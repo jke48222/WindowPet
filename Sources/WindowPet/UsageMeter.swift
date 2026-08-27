@@ -8,6 +8,7 @@ import WindowPetCore
 /// Prices are the published per-million rates for the model in use; cached
 /// reads are far cheaper than fresh input, which is why the agentic loop's
 /// cache breakpoint matters and why they're counted separately.
+@MainActor
 final class UsageMeter {
     static let shared = UsageMeter()
 
@@ -27,9 +28,11 @@ final class UsageMeter {
     ]
 
     private let dayKey = "usageDay"
+    private let limitKey = "dailyBudget"
     private let inputKey = "usageInput"
     private let cachedKey = "usageCached"
     private let outputKey = "usageOutput"
+    private let warnedKey = "usageWarnedDay"
 
     private var input = 0
     private var cached = 0
@@ -81,15 +84,50 @@ final class UsageMeter {
             + (Double(output) / 1_000_000) * rate.output
     }
 
+    // MARK: - The ceiling
+
+    /// Dollars per day. Zero is no ceiling. Absent means nobody has changed
+    /// it, so the shipping default applies rather than "unlimited".
+    var limit: Double {
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.object(forKey: limitKey) != nil else { return BudgetPolicy.defaultLimit }
+            return defaults.double(forKey: limitKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: limitKey) }
+    }
+
+    var state: BudgetPolicy.State {
+        rolloverIfNeeded()
+        return BudgetPolicy.state(spent: todaysCost, limit: limit)
+    }
+
+    /// nil when the next model call may go ahead. Otherwise the sentence to
+    /// show the user in place of making it. Callers check this immediately
+    /// before spending, never after.
+    var blockedMessage: String? {
+        guard state == .exceeded else { return nil }
+        return BudgetPolicy.exceededMessage(spent: todaysCost, limit: limit)
+    }
+
+    /// Said once per day, the first time spending crosses the warning mark,
+    /// so the ceiling is never a surprise when it arrives.
+    func warningIfNewlyNear() -> String? {
+        guard state == .nearLimit else { return nil }
+        let defaults = UserDefaults.standard
+        guard defaults.string(forKey: warnedKey) != today else { return nil }
+        defaults.set(today, forKey: warnedKey)
+        return BudgetPolicy.nearLimitMessage(spent: todaysCost, limit: limit)
+    }
+
     /// One line for the menu. Sub-cent days read as "under a cent" rather
     /// than a misleading $0.00.
     var summary: String {
         rolloverIfNeeded()
         let total = input + cached + output
-        guard total > 0 else { return "Usage today: nothing yet" }
-        let cost = todaysCost
-        let money = cost < 0.01 ? "under a cent" : String(format: "$%.2f", cost)
+        let ceiling = BudgetPolicy.limitDescription(limit)
+        guard total > 0 else { return "Usage today: nothing yet (\(ceiling))" }
         let tokens = total >= 1000 ? "\(total / 1000)k tokens" : "\(total) tokens"
-        return "Usage today: \(tokens), \(money)"
+        return "Usage today: \(tokens), \(BudgetPolicy.money(todaysCost)) of \(ceiling)"
     }
 }

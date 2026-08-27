@@ -6,7 +6,7 @@ import Foundation
 /// `sprites` picks which built-in robot finish to wear ("tinplate",
 /// "seafoam", "midnight", "sakura"); the rest recolors the chat panel, the
 /// speech bubble, and the status lamp.
-public struct SkinDefinition: Codable, Equatable {
+public struct SkinDefinition: Codable, Equatable, Sendable {
     public let name: String
     public let sprites: String
     public let accent: String

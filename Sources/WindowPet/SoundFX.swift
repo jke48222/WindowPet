@@ -4,6 +4,7 @@ import AVFoundation
 /// timbre is a struck kalimba tine, not a beep: a warm fundamental with a
 /// long exponential decay, plus two fast-dying inharmonic partials (~3.9x,
 /// ~8.9x — bar-vibration modes) that give the attack its woody "tick".
+@MainActor
 final class SoundFX {
     static let shared = SoundFX()
     private var players: [String: AVAudioPlayer] = [:]

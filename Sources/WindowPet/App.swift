@@ -15,6 +15,7 @@ enum Main {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     enum Mode {
@@ -171,28 +172,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.isReleasedWhenClosed = false
         w.orderFrontRegardless()
         var step = 0
+        // Main-queue dispatch timers rather than Timer: their handlers stay
+        // on the main actor, so the window and the step counter are touched
+        // from exactly one place.
+        let ticker = DispatchSource.makeTimerSource(queue: .main)
         if spamTitle {
             // A fake build: retitle ~3×/s for ~4.5 s so observers see
             // kAXTitleChanged bursts, then exit.
-            Timer.scheduledTimer(withTimeInterval: 0.33, repeats: true) { timer in
+            ticker.schedule(deadline: .now() + 0.33, repeating: 0.33)
+            ticker.setEventHandler {
                 step += 1
                 w.title = "compiling step \(step) of 14…"
-                if step > 14 {
-                    timer.invalidate()
-                    exit(0)
-                }
+                if step > 14 { exit(0) }
             }
         } else {
             // Wiggle for ~3.5 s so an observer sees kAXWindowMoved events.
-            Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { timer in
+            ticker.schedule(deadline: .now() + 1.0 / 30.0, repeating: 1.0 / 30.0)
+            ticker.setEventHandler {
                 step += 1
                 w.setFrameOrigin(CGPoint(x: 320 + CGFloat(step % 40) * 3, y: 320))
-                if step > 105 {
-                    timer.invalidate()
-                    exit(0)
-                }
+                if step > 105 { exit(0) }
             }
         }
+        ticker.resume()
+        helperTicker = ticker
     }
 
     private static func parseMode(_ args: [String]) -> Mode {
@@ -372,6 +375,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         usage.isEnabled = false
         menu.addItem(usage)
         usageItem = usage
+        menu.addItem(NSMenuItem(title: "Daily Spend Limit…", action: #selector(setSpendLimit),
+                                keyEquivalent: ""))
         let character = NSMenuItem(title: "Character: \(characterName)", action: nil, keyEquivalent: "")
         character.isEnabled = false
         menu.addItem(character)
@@ -467,7 +472,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var characterItem: NSMenuItem?
     private var enableItem: NSMenuItem?
     private var fullDiskItem: NSMenuItem?
-    private var grantPollTimer: Timer?
+    private var grantPollTimer: DispatchSourceTimer?
+    /// Held so the AX-helper window's ticker outlives the call that made it.
+    private var helperTicker: DispatchSourceTimer?
 
     private func refreshFullDiskItem() {
         fullDiskItem?.title = FullDiskAccess.granted
@@ -498,21 +505,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// pick it up without a restart.
     @objc private func enableSenses() {
         AXPermission.requestWithPrompt()
-        grantPollTimer?.invalidate()
+        grantPollTimer?.cancel()
         var polls = 0
-        grantPollTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] t in
-            guard let self else { t.invalidate(); return }
+        let poller = DispatchSource.makeTimerSource(queue: .main)
+        poller.schedule(deadline: .now() + 2, repeating: 2)
+        poller.setEventHandler { [weak self] in
+            guard let self else { poller.cancel(); return }
             polls += 1
             if self.engine.tier2.enableIfTrusted() {
-                t.invalidate()
+                poller.cancel()
                 if let pid = self.engine.currentPlatformPID {
                     self.engine.tier2.attach(to: pid, protecting: pid)
                 }
                 self.refreshSensesItem()
             } else if polls > 180 { // give up after ~6 min
-                t.invalidate()
+                poller.cancel()
             }
         }
+        poller.resume()
+        grantPollTimer = poller
     }
 
     /// Character manager: point at any shimeji-ee pack directory; hot-swaps
@@ -582,6 +593,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             elevenLabsItem?.title = elevenLabsMenuTitle()
         }
+    }
+
+    /// The ceiling on what Rusty may spend per day. Enforced before every
+    /// model call, so raising it here is the only way past a stop.
+    @objc private func setSpendLimit() {
+        NSApp.activate()
+        let meter = UsageMeter.shared
+        let alert = NSAlert()
+        alert.messageText = "Daily Spend Limit"
+        alert.informativeText = "The most Rusty may spend on thinking in one day. He stops before every model call once it is reached, and the count resets at midnight. Type a dollar amount, or \"none\" for no ceiling.\n\n\(meter.summary)"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = meter.limit <= BudgetPolicy.unlimited
+            ? "none" : String(format: "%.2f", meter.limit)
+        field.placeholderString = "5.00"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard let parsed = BudgetPolicy.parseLimit(field.stringValue) else {
+            let complaint = NSAlert()
+            complaint.messageText = "That is not an amount"
+            complaint.informativeText = "Type a number like 5 or 12.50, or \"none\" to remove the ceiling. The limit is unchanged."
+            complaint.runModal()
+            return
+        }
+        meter.limit = parsed
+        usageItem?.title = meter.summary
     }
 
     /// Same local-only handling as the ElevenLabs key: secure field, stored

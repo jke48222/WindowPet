@@ -48,7 +48,7 @@ public enum KeyCodes {
     }
 }
 
-public struct HotKeyModifiers: OptionSet, Equatable {
+public struct HotKeyModifiers: OptionSet, Equatable, Sendable {
     public let rawValue: Int
     public init(rawValue: Int) { self.rawValue = rawValue }
 
@@ -69,7 +69,7 @@ public struct HotKeyModifiers: OptionSet, Equatable {
 }
 
 /// The shortcut that summons Rusty's chat panel.
-public struct HotKeyBinding: Equatable {
+public struct HotKeyBinding: Equatable, Sendable {
     public let keyCode: UInt16
     public let modifiers: HotKeyModifiers
 

@@ -9,6 +9,8 @@ import WindowPetCore
 ///
 /// Parts: B window terrain · A floor/touch/climb · C Tier-2 AX events ·
 /// D behavior brain · E reactions.
+/// Drives the app from the main run loop, so it shares the UI isolation.
+@MainActor
 final class TestRig {
 
     private let engine: PetEngine
@@ -24,6 +26,8 @@ final class TestRig {
     private var moveHelper: Process?
     private var spamHelper: Process?
     private var moveDone = false
+    /// Holds the drag-glide ticker so it outlives the step that starts it.
+    private var dragGlide: DispatchSourceTimer?
     private var lastStatus = ""
 
     private var xMark: CGFloat = 0
@@ -189,11 +193,21 @@ final class TestRig {
             self.moveDone = false
             let start = self.winA.frame.origin
             let t0 = Date()
-            Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { timer in
+            // A main-queue dispatch timer rather than Timer: its handler keeps
+            // main-actor isolation, so the window and the done flag are only
+            // ever touched from one place.
+            let glide = DispatchSource.makeTimerSource(queue: .main)
+            glide.schedule(deadline: .now(), repeating: 1.0 / 60.0)
+            glide.setEventHandler {
                 let p = min(1, Date().timeIntervalSince(t0) / 1.0)
                 self.winA.setFrameOrigin(CGPoint(x: start.x + 220 * p, y: start.y))
-                if p >= 1 { timer.invalidate(); self.moveDone = true }
+                if p >= 1 {
+                    glide.cancel()
+                    self.moveDone = true
+                }
             }
+            glide.resume()
+            self.dragGlide = glide
         }, until: { self.moveDone && abs((self.engine.anchor.x - self.xMark) - 220) <= 3 })
         assertNow("still on A after the ride") { self.onTop(of: self.winA) }
         assertNow("sprite feet on anchor (post-ride)") { self.spriteOnAnchor() }

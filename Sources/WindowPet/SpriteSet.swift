@@ -69,7 +69,7 @@ final class SpriteSet {
         loadedFrameCount = provided.values.reduce(0) { $0 + $1.frames.count }
     }
 
-    init(skin: String = SkinTheme.currentID) {
+    @MainActor init(skin: String = SkinTheme.currentID) {
         facesLeft = false
         func img(_ name: String) -> CGImage? {
             let full = name.replacingOccurrences(of: "pet_", with: "pet_\(skin)_")

@@ -18,7 +18,7 @@ public struct SeededRNG {
 
 /// The needs vector from the dossier: drifts over time, modified by observed
 /// events. This — not randomness — is what makes behavior feel motivated.
-public struct NeedsVector: Equatable {
+public struct NeedsVector: Equatable, Sendable {
     public var energy: Double      // 0 = exhausted, 1 = fully charged
     public var curiosity: Double   // builds until satisfied by exploring
     public var attention: Double   // builds until the user interacts

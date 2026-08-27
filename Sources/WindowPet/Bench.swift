@@ -33,6 +33,7 @@ enum CPUSampler {
     }
 }
 
+@MainActor
 final class BenchRunner {
     private let engine: PetEngine
     private let phaseSeconds: TimeInterval
@@ -95,11 +96,15 @@ final class BenchRunner {
     }
 
     private func phaseActive() {
+        // Timer blocks arrive without an actor; this one is scheduled on the
+        // main run loop, so assumeIsolated names the thread it already runs on.
         travelTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.travelToggle.toggle()
-            let target = self.travelToggle ? self.w1! : self.w2!
-            self.engine.debugTravel(to: CGWindowID(exactly: target.windowNumber) ?? 0)
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.travelToggle.toggle()
+                let target = self.travelToggle ? self.w1! : self.w2!
+                self.engine.debugTravel(to: CGWindowID(exactly: target.windowNumber) ?? 0)
+            }
         }
         travelTimer?.fire()
         measure("active") {
@@ -155,7 +160,10 @@ final class BenchRunner {
         poll()
     }
 
-    private func after(_ s: TimeInterval, _ block: @escaping () -> Void) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + s, execute: block)
+    private func after(_ s: TimeInterval, _ block: @escaping @MainActor () -> Void) {
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(s))
+            block()
+        }
     }
 }

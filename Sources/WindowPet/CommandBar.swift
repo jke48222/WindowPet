@@ -8,6 +8,7 @@ import WindowPetCore
 /// The header is a drag handle with a minimize control that collapses the
 /// panel to a slim pill. Enter submits, a second Enter confirms destructive
 /// verbs, Esc dismisses.
+@MainActor
 final class CommandBar: NSObject, NSTextFieldDelegate {
 
     private enum Layout {
@@ -312,15 +313,19 @@ final class CommandBar: NSObject, NSTextFieldDelegate {
     private func present() {
         cancelHide()
         if !panel.isVisible {
-            let screen = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1512, height: 944)
-            var origin = pinnedOrigin ?? CGPoint(x: screen.midX - Layout.width / 2,
-                                                 y: screen.midY + 40)
-            if pinnedOrigin == nil, let a = petAnchorProvider?() {
+            // Open on the display the panel was last pinned to, or the one
+            // Rusty is standing on, rather than assuming the main display.
+            let anchor = pinnedOrigin ?? petAnchorProvider?()
+            let screen = Screens.visibleFrame(for: anchor)
+            var origin = CGPoint(x: screen.midX - Layout.width / 2, y: screen.midY + 40)
+            if let pinnedOrigin {
+                origin = pinnedOrigin
+            } else if let a = petAnchorProvider?() {
                 origin = CGPoint(x: a.x - Layout.width / 2, y: a.y + 64)
             }
-            origin.x = min(max(origin.x, screen.minX + 12), screen.maxX - Layout.width - 12)
-            origin.y = min(max(origin.y, screen.minY + 12), screen.maxY - 140)
-            panel.setFrameOrigin(origin)
+            panel.setFrameOrigin(DisplayChoice.clamp(
+                origin: origin, size: CGSize(width: Layout.width, height: 128),
+                into: screen, inset: 12))
         }
         relayout()
         panel.orderFrontRegardless()
@@ -739,12 +744,12 @@ final class CommandBar: NSObject, NSTextFieldDelegate {
         let top = frame.maxY
         frame.size = CGSize(width: panelWidth, height: panelHeight)
         frame.origin.y = top - panelHeight
-        if let screen = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
-            if frame.maxY > screen.maxY - 8 { frame.origin.y = screen.maxY - 8 - panelHeight }
-            if frame.origin.y < screen.minY + 8 { frame.origin.y = screen.minY + 8 }
-            if frame.maxX > screen.maxX - 8 { frame.origin.x = screen.maxX - 8 - panelWidth }
-            if frame.origin.x < screen.minX + 8 { frame.origin.x = screen.minX + 8 }
-        }
+        // Grow within whichever display the panel is on. `panel.screen` is nil
+        // once the panel is fully off-screen, so fall back to the display its
+        // origin points at rather than to the main one.
+        let screen = panel.screen?.visibleFrame ?? Screens.visibleFrame(for: frame.origin)
+        frame.origin = DisplayChoice.clamp(origin: frame.origin, size: frame.size,
+                                           into: screen, inset: 8)
         panel.setFrame(frame, display: true)
         container.frame = CGRect(x: 0, y: 0, width: panelWidth, height: panelHeight)
         CATransaction.begin()

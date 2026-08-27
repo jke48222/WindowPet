@@ -6,13 +6,16 @@ import WindowPetCore
 /// read-aloud voices — keyless, no account, unofficial-but-stable) and plays
 /// the result. Finds a python3 that has the edge_tts package; callers fall
 /// back to other providers when unavailable or failing.
+@MainActor
 final class EdgeTTSPlayer: NSObject, AVAudioPlayerDelegate {
 
     /// Fires when playback actually ends (voice follow-up gating).
     var onFinished: (() -> Void)?
 
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        onFinished?()
+    // AVFoundation calls this back without an actor, so hop before touching
+    // the callback the rest of the app installed on the main thread.
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        Task { @MainActor in self.onFinished?() }
     }
 
     private var player: AVAudioPlayer?
@@ -66,27 +69,38 @@ final class EdgeTTSPlayer: NSObject, AVAudioPlayerDelegate {
         proc.arguments = args
         proc.standardError = FileHandle.nullDevice
         proc.standardOutput = FileHandle.nullDevice
-        proc.terminationHandler = { [weak self] p in
-            DispatchQueue.main.async {
-                defer { try? FileManager.default.removeItem(at: out) }
-                guard p.terminationStatus == 0,
-                      let data = try? Data(contentsOf: out), data.count > 400,
-                      let player = try? AVAudioPlayer(data: data) else {
-                    completion(false)
-                    return
-                }
-                self?.player?.stop()
-                self?.player = player
-                player.delegate = self
-                player.play()
-                completion(true)
+        currentProcess = proc
+        Task { [weak self] in
+            let ok = await Self.finish(proc)
+            defer { try? FileManager.default.removeItem(at: out) }
+            guard ok, let self,
+                  let data = try? Data(contentsOf: out), data.count > 400,
+                  let player = try? AVAudioPlayer(data: data) else {
+                completion(false)
+                return
             }
+            self.player?.stop()
+            self.player = player
+            player.delegate = self
+            player.play()
+            completion(true)
         }
-        do {
-            try proc.run()
-            currentProcess = proc
-        } catch {
-            completion(false)
+    }
+
+    /// Runs the synthesizer off the main actor. The termination handler
+    /// captures only the continuation, so nothing owned by the main actor
+    /// crosses threads.
+    private nonisolated static func finish(_ proc: Process) async -> Bool {
+        await withCheckedContinuation { continuation in
+            proc.terminationHandler = { finished in
+                continuation.resume(returning: finished.terminationStatus == 0)
+            }
+            do {
+                try proc.run()
+            } catch {
+                proc.terminationHandler = nil
+                continuation.resume(returning: false)
+            }
         }
     }
 

@@ -10,6 +10,7 @@ import QuartzCore
 /// It also owns the "click-through with a hole" state: panels ignore mouse
 /// events except while the cursor is over actual creature pixels (per-frame
 /// alpha mask), which is what makes the pet feel physical instead of painted.
+@MainActor
 final class OverlayStage {
 
     let spriteSize = CGSize(width: 64, height: 64)
@@ -80,9 +81,13 @@ final class OverlayStage {
         bubble.addSublayer(bubbleTail)
 
         rebuildPanels()
+        // Displays plugged, unplugged, or rearranged. Delivered on the main
+        // queue, hence assumeIsolated rather than a hop.
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
-            object: nil, queue: .main) { [weak self] _ in self?.rebuildPanels() }
+            object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.rebuildPanels() }
+        }
     }
 
     func rebuildPanels() {
@@ -347,6 +352,7 @@ final class OverlayStage {
 /// Screen-filling content view: forwards clicks on creature pixels to the
 /// stage, refuses everything else (belt and braces on top of the
 /// ignoresMouseEvents hole).
+@MainActor
 final class PetView: NSView {
     private weak var stage: OverlayStage?
 

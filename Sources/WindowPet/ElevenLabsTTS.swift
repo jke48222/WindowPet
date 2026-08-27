@@ -7,16 +7,20 @@ import WindowPetCore
 /// Key sources: UserDefaults "elevenLabsKey" (set via the menu) or the
 /// ELEVENLABS_API_KEY environment variable. Voice/model overridable via
 /// defaults "elevenLabsVoice" / "elevenLabsModel".
+@MainActor
 final class ElevenLabsTTS: NSObject, AVAudioPlayerDelegate {
 
     private var player: AVAudioPlayer?
-    private var currentTask: URLSessionDataTask?
+    /// The in-flight request, kept so a new line of speech cancels the old one.
+    private var currentTask: Task<Void, Never>?
     var onError: ((String) -> Void)?
     /// Fires when playback actually ends (voice follow-up gating).
     var onFinished: (() -> Void)?
 
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        onFinished?()
+    // AVFoundation calls back without an actor, so hop before touching the
+    // callback the app installed on the main thread.
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        Task { @MainActor in self.onFinished?() }
     }
 
     static var apiKey: String? {
@@ -44,32 +48,30 @@ final class ElevenLabsTTS: NSObject, AVAudioPlayerDelegate {
         request.httpBody = spec.body
 
         currentTask?.cancel()
-        currentTask = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if let http = response as? HTTPURLResponse, http.statusCode == 401 {
-                    self.onError?("ElevenLabs rejected the API key. Fix it under ElevenLabs API Key… in the menu bar.")
-                    completion(false)
-                    return
-                }
-                guard error == nil,
-                      let http = response as? HTTPURLResponse, http.statusCode == 200,
-                      let data, data.count > 400 else {
-                    completion(false)
-                    return
-                }
-                self.player?.stop()
-                if let player = try? AVAudioPlayer(data: data) {
-                    self.player = player
-                    player.delegate = self
-                    player.play()
-                    completion(true)
-                } else {
-                    completion(false)
-                }
+        currentTask = Task { [weak self] in
+            let fetched = try? await URLSession.shared.data(for: request)
+            guard !Task.isCancelled, let self else { return }
+            guard let (data, response) = fetched,
+                  let http = response as? HTTPURLResponse else {
+                completion(false)
+                return
             }
+            if http.statusCode == 401 {
+                self.onError?("ElevenLabs rejected the API key. Fix it under ElevenLabs API Key… in the menu bar.")
+                completion(false)
+                return
+            }
+            guard http.statusCode == 200, data.count > 400,
+                  let player = try? AVAudioPlayer(data: data) else {
+                completion(false)
+                return
+            }
+            self.player?.stop()
+            self.player = player
+            player.delegate = self
+            player.play()
+            completion(true)
         }
-        currentTask?.resume()
     }
 
     func stop() {
