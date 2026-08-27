@@ -1,426 +1,398 @@
 # WindowPet
 
-A macOS desktop creature that is genuinely aware of real windows. It sits on
-title bars, rides windows as you drag them, and falls when you close one.
+A small robot lives on your desktop and treats your real application windows as ground. It stands
+on title bars, rides a window as you drag it, leaps to whatever app you switch to, and falls when
+you close the window under its feet. You can reach in and boop it, pick it up, and throw it,
+because the transparent layer it lives on is click-through everywhere except the pixels the
+creature actually occupies.
 
-**Status: 1.0**, a window-aware creature and a full desktop assistant. The
-pet is a physical, touchable creature in a
-world made of window tops, screen floors, and screen-edge walls: it
-spawn-drops onto your frontmost window, rides it as you drag, walks along
-title bars (sometimes strolling right off the edge), falls with gravity when
-its window closes or gets covered, lands with a squash, leaps ballistically to
-whatever app you switch to, climbs the screen edges and backflips off, and , 
-because the overlay is click-through except over actual creature pixels, you
-can boop it with a click, or pick it up with the mouse and throw it. 16
-procedurally generated animation frames. Still zero permission prompts.
+It also talks. Option Space opens a chat panel, and the same creature can answer questions, look
+at your screen, and run things for you, with every destructive action stopped at a confirmation
+first.
 
-Stage 3 added the Accessibility tier: with permission granted (opt-in, from
-the status-bar menu, the app never prompts on its own), `AXObserver` events
-wake the tracker the instant a window moves instead of waiting for the poll.
-Without it, everything above still works exactly the same on Tier 1 alone.
+Zero third party dependencies. `Package.swift` declares no external packages.
 
-**The character is Rusty**, a mid-century tin toy robot: teal tin body,
-silver faceplate, cyan LED eyes (alarm-orange while falling, powered-off
-slits when blinking or mid-landing-squash), chest dial, rivets, and an
-antenna bobble that sways with the walk gait. Ten candidate designs live in
-`Tools/chargen.swift`; the picker sheets came from `Tools/chargen.swift` and
-`Tools/doggen.swift`.
+## What problem this solves
 
-## Run it
+Desktop pets are a thirty year old genre and almost all of them share one flaw: the creature lives
+on a transparent sheet in front of your screen and knows nothing about what is behind it. It walks
+along the bottom of the display or a fixed invisible line, and your windows slide past like
+scenery. The illusion collapses the first time you move something.
 
-As an app: `Tools/make-app.sh` builds `build/WindowPet.app` (icns, accessory
-Info.plist, SPM resources bundled, hardened-runtime Developer ID signing when
-an identity is in the keychain, ad-hoc otherwise, see the script header for
-the notarytool commands once enrolled in the Apple Developer Program).
+The version worth building treats the window layout as the level. Your screen is already a
+platformer: every window's top edge is a ledge, an overlapping window covers part of that ledge,
+and the bottom of the screen is the floor. Read that layout continuously and dragging a window
+becomes moving a platform, closing one drops whatever was standing on it, and switching apps gives
+the creature somewhere new to jump to.
 
-Energy: `Tools/energy-bench.sh` runs the deterministic three-phase benchmark
-and publishes [ENERGY.md](ENERGY.md), hard budgets asserted, CI-ready.
+Two things make that hard on macOS, and they are the two things this project is actually about.
 
-From source:
+**Permissions.** The obvious way to learn about windows is to ask for their titles and owners, and
+that request trips the Screen Recording permission prompt. A pet that demands screen recording
+before it will do anything is a pet nobody installs. The window tracking here reads bounds,
+stacking order and process ID only, which macOS gives away for free.
+
+**Energy.** A creature that is always on screen is always costing something. Anything that idles at
+a few percent of a CPU core is a battery complaint waiting to happen, and "it feels fine" is not a
+number. So the cost is measured per phase against a written budget, and the benchmark is in the
+repo.
+
+## How it works
+
+```
+CGWindowListCopyWindowInfo        WorldModel          Terrain           Planner
+bounds, z-order, PID         ->   windows plus   ->   standable   ->    goal oriented route
+zero permissions                  screen floors       segments          walk, leap, step off
+        ^                                                                     |
+        |                                                                     v
+AXObserver events (Tier 2)                                              PetEngine
+"something moved, go look"                                              state machine
+opt-in, carries no geometry                                                   |
+                                                                              v
+                                                                       OverlayStage
+                                                                       one panel per display
+                                                                       click-through except
+                                                                       over creature pixels
+```
+
+### Two tiers, and only one of them is authoritative
+
+**Tier 1 needs no permissions and is the source of truth.** `CGWindowListCopyWindowInfo` hands back
+bounds, window layer and process ID for every window on screen. That is enough to build terrain,
+and macOS grants it without a prompt. It is polled adaptively: 60 Hz only while the tracked window
+is actually moving, 10 Hz once it settles, 4 Hz after twenty seconds of stillness, 2 Hz with
+nothing to track. The hot loop asks the window server about one window rather than copying the
+entire list. [`Tier1.swift`](Sources/WindowPet/Tier1.swift).
+
+**Tier 2 is optional and buys latency, not authority.** With Accessibility permission granted from
+the menu bar (the app never prompts on its own), an `AXObserver` delivers an event the moment a
+window moves instead of waiting for the next poll. The accessibility API is the structured
+description of windows and controls that macOS publishes for screen readers. The important design
+choice: **these events never carry geometry.** They only mean "consult Tier 1 now," so an app whose
+accessibility tree lies cannot move the creature. Every element gets a 100 millisecond messaging
+timeout, because the default would hang the pet against a beachballing app. Observers are capped
+at six with least-recently-used eviction. If Tier 2 fails completely, everything still works.
+[`Tier2.swift`](Sources/WindowPet/Tier2.swift),
+[`Tier2Policy.swift`](Sources/WindowPetCore/Tier2Policy.swift).
+
+### Terrain, and moving with apparent intent
+
+[`Terrain.swift`](Sources/WindowPetCore/Terrain.swift) takes the window list in stacking order and
+splits each top edge into the stretches that are genuinely exposed. A window half covered by
+another offers half a ledge.
+
+[`Planner.swift`](Sources/WindowPetCore/Planner.swift) plans a route over that terrain in the style
+of GOAP (goal oriented action planning, the technique from game AI where an agent searches over
+available actions to reach a goal state rather than following a fixed script). Its actions are
+walk, ranged leap and step off. Multi step plans are what read as intent: "walk under that window,
+then jump up to it" looks deliberate in a way a random interval scheduler never does.
+
+### The click-through hole
+
+[`OverlayPanel.swift`](Sources/WindowPet/OverlayPanel.swift) is a borderless non-activating panel,
+floating above everything, joining all Spaces, ignoring mouse events. It can never steal focus and
+never eats a click.
+
+The creature would be untouchable if that were the whole story, so
+[`OverlayStage.swift`](Sources/WindowPet/OverlayStage.swift) opens a hole. A global mouse-moved
+monitor (which needs no permission) tracks the cursor, and each animation frame carries a coarse
+32 by 32 alpha mask, about a kilobyte, recording which pixels are opaque. The panel accepts mouse
+events only while the cursor is over solid creature pixels, and the test is facing aware. A quick
+click boops it. A drag picks it up and pauses physics entirely. Releasing throws it, using the
+cursor's recent velocity from a ring of position samples.
+
+That mask is the difference between a creature that feels physical and a picture painted on your
+screen.
+
+### The sprite moves on the GPU
+
+The creature is a Core Animation layer moved inside a transaction, not a window whose geometry the
+window server has to recompute. That single change is what brought active CPU inside budget, from
+roughly 4 to 5 percent down to about 1.
+
+### The assistant
+
+Option Space (rebindable) opens [`CommandBar.swift`](Sources/WindowPet/CommandBar.swift), the one
+surface for every input method: typed, push to talk, or the opt-in "Hey Rusty" wake word. Requests
+route through three tiers, cheapest first: a free local grammar, then Apple's on-device foundation
+model, then Claude over HTTP.
+
+**Every tier only ever proposes.** Each returns a verb, an argument and a reply. Execution always
+goes through the same gate, and that is the part worth reading.
+
+## The safety gate
+
+[`Assistant.swift`](Sources/WindowPetCore/Assistant.swift) defines the action verbs and marks which
+ones require confirmation:
+
+- `quitApp` always confirms.
+- `runAppleScript` confirms when the script matches the dangerous-script check.
+- `runAdminShell` always confirms, without exception.
+
+Three properties make this hold up:
+
+1. **The agent loop routes through the same gate as typed input.**
+   [`AgentSession.swift`](Sources/WindowPet/AgentSession.swift) checks `needsConfirmation` on every
+   tool call the model makes. When one needs approval, the loop **suspends mid-plan**, stashing the
+   remaining calls, rather than pre-approving a batch. Each destructive step gets its own
+   checkpoint.
+2. **Privileged commands hand off to macOS.**
+   [`AssistantExecutor.swift`](Sources/WindowPet/AssistantExecutor.swift) runs them via
+   `do shell script ... with administrator privileges`, which puts the system's own password dialog
+   in front of the user. There is no stored credential and no standing privileged helper. A
+   privileged command therefore needs two human checkpoints: the panel confirmation, then the OS
+   password prompt.
+3. **It is tested.** 24 tests on the routing layer and 11 on the agent loop, plus end to end checks
+   in the rig asserting that quit, admin and destructive scripts are gated while a harmless script
+   is not.
+
+## What it never reads, stated precisely
+
+**The window tracking layer never reads window titles.** `kCGWindowName` and `kCGWindowOwnerName`
+trip the Screen Recording prompt on recent macOS, and bounds, layer, process ID and window number
+do not. The invariant is written into [`Tier1.swift`](Sources/WindowPet/Tier1.swift) lines 18 to 19
+as a comment and is deliberately greppable, and it holds: those two constants appear nowhere else
+in the source.
+
+The reaction system, which notices that a Terminal is retitling itself constantly during a build,
+senses **frequency only**. It subscribes to `kAXTitleChangedNotification` and counts events. The
+comment on that line in [`Tier2.swift`](Sources/WindowPet/Tier2.swift) reads "frequency only, we
+never read the title," and the string genuinely never reaches the app.
+
+**This claim is about window tracking, and only window tracking.** The shipped app also has a "look
+at my screen" feature: [`ScreenCapture.swift`](Sources/WindowPet/ScreenCapture.swift) takes a
+screenshot and [`ClaudeVision.swift`](Sources/WindowPetCore/ClaudeVision.swift) sends it with your
+question. That needs Screen Recording permission and macOS will prompt for it the first time you
+use it. Both statements are true at once, and stating only the first would be misleading the moment
+somebody launched the app.
+
+## Results
+
+Every number below has a file or a command behind it.
+
+| Result | Value | How it was measured |
+| --- | --- | --- |
+| Unit tests | **131 passing, 0 failures**, across 15 files | `swift test`, run 2026-08-27 |
+| End to end rig | **93 of 93**, seven parts | `--testrig`, run 2026-08-27, caveat below |
+| Idle CPU | **0.24%** of one core, 47.7 MB | [`ENERGY.md`](ENERGY.md), M5 Pro, release build |
+| Perched CPU | **0.42%**, 47.6 MB | Same run |
+| Active CPU | **1.04%**, 48.5 MB | Same run |
+| Source size | 12,561 lines, 66 files | Sources 9,704, Tests 1,475, Tools 1,354, Package.swift 28 |
+| Dependencies | zero | `Package.swift` |
+
+### The energy numbers, and how they were taken
+
+[`ENERGY.md`](ENERGY.md) is generated by [`Tools/energy-bench.sh`](Tools/energy-bench.sh), not
+typed by hand. The method matters more than the figures:
+
+- Measured 2026-08-19 on an Apple M5 Pro, macOS 27, **release build**.
+- The app instruments itself. `--bench` drives three **deterministic 15 second phases** through the
+  same debug hooks the test rig uses, so "sleep," "perched" and "active" mean the same thing on
+  every run, rather than being whatever the process happened to be doing during a sample window.
+- CPU comes from `getrusage`, summing user and system time over the phase. Resident memory comes
+  from `task_info`.
+- Budgets are encoded in the script and it **exits non-zero on any hard budget violation**, so it
+  can gate a build.
+- Reproduce: `bash Tools/energy-bench.sh 15`. Cross-check from outside the process:
+  `sudo powermetrics --samplers tasks -i 5000 -n 3 | grep WindowPet`.
+
+| Phase | What it is doing | CPU | Budget | Resident |
+| --- | --- | ---: | ---: | ---: |
+| sleep | asleep, nothing moving | **0.24%** | 0.3% hard | 47.7 MB |
+| perched | awake on a title bar, breathing and blinking | 0.42% | 1.0% soft | 47.6 MB |
+| active | continuous planned travel between two windows | **1.04%** | 3.0% hard | 48.5 MB |
+
+### The measurement that is not published
+
+The same file records an attempt to measure the wake word listener that came back **inconclusive,
+and is deliberately not published.** Sampling the installed app with the setting on and off gave
+overlapping CPU, roughly 0.7 to 2.1 percent either way, with noise dominating at that sample size.
+
+Then the reason turned up. Running the installed binary with `--diag` reported that speech and
+microphone permission had never been asked for, which means speech recognition never started, which
+means **nothing was measured at all.** A real number needs Microphone and Speech Recognition
+granted to the installed app first.
+
+The figures in the table above are therefore the wake-word-off configuration, and the wake-word-on
+cost is currently unknown.
+
+### The leap solver test
+
+A ballistic solver answers this question: given where the creature is standing and where it wants
+to land, what launch velocity produces a gravity-driven arc that ends exactly on the target?
+[`PetPhysics.swift`](Sources/WindowPetCore/PetPhysics.swift) returns a horizontal velocity, a
+vertical velocity and a duration.
+
+The interesting part is how it is tested.
+[`PhysicsTests.swift`](Tests/WindowPetCoreTests/PhysicsTests.swift) `testLeapSolutionLandsOnTarget`
+does **not** re-derive the closed form and check the algebra against itself. It takes the solver's
+answer and then **numerically integrates the arc forward using `PetPhysics.fallStep`, the exact
+function the running engine steps every frame**, at a 1/120 second timestep with the final partial
+step clamped, and asserts the creature arrives within 1.5 points on both axes across three targets
+(up and right, down and left, and level).
+
+That is a stronger test because it closes the loop between the two pieces that have to agree. A
+closed form check only proves the formula is self consistent. This proves the solver and the engine
+share a sign convention (this codebase uses AppKit's y-up, so gravity subtracts from vertical
+velocity), share a gravity constant, agree about the duration clamp, and survive the discretization
+error of the real frame cadence. Any of those drifting apart is a creature that visibly overshoots,
+and none of them would be caught by checking the maths.
+
+### About the rig number
+
+`--testrig` is not a unit test suite. It launches the real app, opens and animates its own windows,
+and spawns helper processes that wiggle a titled window from another process so the accessibility
+observer sees genuine cross-process events, then asserts against the running creature.
+
+The total is a **runtime tally**, not something a static count of the source can settle: the rig
+increments once per named step that resolves plus each explicit check. Four runs on 2026-08-27 gave
+93 of 93 three times and 90 of 93 once, with all three failures in the planned-travel phase timing
+out on a loaded machine. **Treat 93 of 93 as the expected result and planner travel as the part
+that is timing sensitive under load.** The rig is built to wait rather than assert against wall
+clock choreography, but that phase has the least slack.
+
+The seven parts: window terrain, floor and touch and climb, Tier 2 accessibility events, the
+behavior planner, reactions, third party sprite pack import, and the assistant surface. The last
+runs entirely offline against real objects, with no API calls.
+
+## Running it
+
+Requires macOS 14 or newer on Apple silicon and the Swift toolchain from Xcode. There is no package
+manager step, because there are no dependencies.
 
 ```bash
 swift run -c release WindowPet
 ```
 
-Quit via the status-bar menu (also shows which app the pet is riding), or
-`pkill -x WindowPet`. Diagnostics:
+The creature drops onto your frontmost window. Quit from the paw print in the menu bar, which also
+shows which app it is currently riding, or `pkill -x WindowPet`.
+
+Grant Accessibility from that same menu when you want event-driven tracking. The app never prompts
+for it on its own, and everything works without it.
 
 ```bash
-swift run WindowPet -- --diag 6      # verbose target/tracking log for 6s, then exits
-swift run WindowPet -- --testrig     # self-driving e2e check (opens+animates its own windows), exits 0/1
-swift test                           # geometry, physics, terrain + Tier-2 policy unit tests
+swift test                          # 131 unit tests, headless, opens no windows
+swift run WindowPet -- --diag 6     # verbose tracking log for 6 seconds, then exits
+swift run WindowPet -- --testrig    # end to end check, opens its own windows, exits 0 or 1
+swift run WindowPet -- --bench 15   # energy benchmark, asserts budgets, exits 0 or 1
+swift run WindowPet -- --ask "..."  # headless: run one prompt through the agent and print
 ```
 
-Regenerate the placeholder sprite (or just replace `Sources/WindowPet/Resources/pet.png`
-with real art, the app only loads the PNG):
+A successful `swift test` ends with `Executed 131 tests, with 0 failures`. A successful rig run ends
+with `RIG PASS 93/93` and exit code 0.
+
+Build a distributable app:
+
+```bash
+bash Tools/make-app.sh    # -> build/WindowPet.app
+bash Tools/make-dist.sh   # -> build/WindowPet.dmg, drag to Applications
+```
+
+Regenerate the sprite sheet, or replace the PNG with real art. The app only loads the PNG, so
+commissioned art drops straight in:
 
 ```bash
 swift run PetGen Sources/WindowPet/Resources/pet.png
 ```
 
-## How the creature works
+The assistant needs an Anthropic API key to reach the Claude tier. Without one, the local grammar
+and the on-device model still work.
 
-- **Terrain** ([Terrain.swift](Sources/WindowPetCore/Terrain.swift)): every
-  on-screen window's top edge, split into exposed segments by z-order
-  occlusion, plus screen floors. The window layout is a platformer level.
-- **Physics** ([PetPhysics.swift](Sources/WindowPetCore/PetPhysics.swift)):
-  gravity 2400 pt/s², trapezoidal integration, ballistic leap solver. Pure
-  functions, unit-tested against the same integrator the engine runs.
-- **FSM** ([PetEngine.swift](Sources/WindowPet/PetEngine.swift)):
-  falling → landing → standing → walking, with leaps on app activation
-  (debounced 400 ms so cmd-tab spam doesn't yank the pet). Eviction rules:
-  window closed/minimized → fall; stand-point occluded (1 Hz audit) → fall.
-- **Presentation** ([OverlayStage.swift](Sources/WindowPet/OverlayStage.swift)):
-  one screen-sized overlay panel per display; the sprite is a CALayer moved
-  GPU-side (a Core Animation transaction, not a window-server geometry
-  change), this is what brought active-state CPU inside the energy budget.
-  Wall climbs rotate the layer ±90°.
-- **Touch**: panels are click-through except over creature pixels, a global
-  mouse-moved monitor (no TCC permission needed) plus a per-frame 32×32 alpha
-  mask open the "hole" only when the cursor is over the pet. Quick click =
-  boop (happy squash, never relocates it); drag = pick up (physics pauses,
-  event-driven); release = ballistic throw with the cursor's velocity.
-- **Clocks**: CADisplayLink only while something moves, 60 fps for
-  falls/leaps/drag-riding, 30 fps for walks/climbs, paused entirely when
-  settled AND while held by the mouse. A 0.5 s ambient timer breathes/blinks
-  while perched. The rig asserts the link is paused after settling.
+## Project layout
 
-## The brain (S4, GOBT behavior layer)
+```
+Sources/
+├── WindowPetCore/          Pure logic. No AppKit, headless testable, all of it under test
+│   ├── Geometry.swift          The Core Graphics to AppKit coordinate flip
+│   ├── Terrain.swift           Window list to standable segments, occlusion aware
+│   ├── PetPhysics.swift        Gravity, fall integration, the ballistic leap solver
+│   ├── Planner.swift           Goal oriented route planning over the platform graph
+│   ├── Behavior.swift          Seeded random source and the needs vector driving choices
+│   ├── RatePolicy.swift        Adaptive poll cadence driven by observed motion
+│   ├── ReactionPolicy.swift    Exponentially decaying event-rate maths
+│   ├── Tier2Policy.swift       Accessibility health: probation, contradiction, degradation
+│   ├── Assistant.swift         The action verbs, and which ones require confirmation
+│   ├── ClaudeRouting.swift     Request build and response parse for the Messages API
+│   ├── ClaudeAgent.swift       The tool-use loop and its tool schemas
+│   ├── StreamAccumulator.swift Rebuilding a turn from a server-sent event stream
+│   ├── PetMemory.swift         Durable facts and a conversation tail across launches
+│   ├── ShimejiActions.swift    Parsing third party sprite pack definitions
+│   └── SkinDefinition.swift    The user-authored JSON skin schema
+├── WindowPet/              The AppKit application
+│   ├── Tier1.swift             Window list polling. Zero permissions
+│   ├── Tier2.swift             AXObserver event stream. Opt-in
+│   ├── WorldModel.swift        Windows and screen floors to platforms
+│   ├── PetEngine.swift         The creature state machine, the largest file here
+│   ├── OverlayStage.swift      Presentation, and the click-through hole
+│   ├── OverlayPanel.swift      The transparent non-activating all-Spaces panel
+│   ├── SpriteSet.swift         Animation frames and their per-frame alpha masks
+│   ├── CommandBar.swift        The chat panel: typed, spoken and wake word
+│   ├── AgentSession.swift      One agentic conversation, suspending on confirmation
+│   ├── AssistantExecutor.swift Executing gated actions, including the admin handoff
+│   ├── AssistantBrain.swift    On-device Apple foundation model routing
+│   ├── ClaudeRouter.swift      The cloud tier
+│   ├── VoiceInput.swift        Push to talk, on-device recognition
+│   ├── WakeWordListener.swift  Opt-in always-on wake word, one audio engine
+│   ├── ScreenCapture.swift     Screen grab for "look at my screen"
+│   ├── Skins.swift             Four built-in finishes
+│   ├── ShimejiImporter.swift   Third party sprite packs, hot swappable
+│   ├── TestRig.swift           The --testrig runner, seven parts
+│   ├── Bench.swift             The --bench self-instrumenting energy benchmark
+│   └── App.swift               Delegate, mode parsing, status item
+└── PetGen/                 One-shot sprite generator
 
-Per the dossier: a BT-ish mode skeleton (Sleeping / Active, with physical
-Reacting handled by the engine), **utility scoring** within the active mode,
-and a small **GOAP planner**, all pure, seeded, unit-tested code in
-`WindowPetCore` ([Behavior.swift](Sources/WindowPetCore/Behavior.swift),
-[Planner.swift](Sources/WindowPetCore/Planner.swift)); the engine only
-executes directives.
-
-- **Needs vector** (energy / curiosity / attention / boredom) drifts with
-  activity and is modified by events: boops and grabs satisfy attention,
-  arriving somewhere new satisfies curiosity, idling builds boredom,
-  everything spends energy.
-- **Utility scoring** picks among sit / stroll / step-off-the-edge / travel /
-  climb via softmax with a repeat penalty, so idling never loops one
-  behavior, and a curious ignored pet visibly gravitates to your active
-  window.
-- **Travel is planned, not teleported**: leaps have a planning range (560 pt),
-  so far targets route as real itineraries, walk under it, hop the
-  mid-height window, leap again. If no ranged route exists, a single direct
-  cartoon leap keeps reachability identical to stage 2.
-- **Sleep**: exhaustion forces a recharge nap (drooped antenna, green
-  charging dial, drifting Zs); boops, grabs, and falls wake it; recharged, it
-  wakes on its own. Clocks stay paused while it sleeps, naps are free.
-
-## Assistant (A1–A5)
-
-Summon **Rusty's chat panel** with **Option-Space** (rebindable: menu bar,
-Shortcut, then press any combo) or by double-clicking him. One glass panel shared by every input method: typing, push-to-talk,
-and the wake word all land in the same rolling transcript. Drag the header
-to move it, Esc hides it. Standard editing keys work inside it (Command-C, V, X, A, Z, and
-Shift-Z), and Command-C with nothing selected copies Rusty's last answer.
-The transcript keeps the full conversation and scrolls; minimizing shrinks
-the panel to a small square chip with his face that you click to reopen,
-and the close control hides it until you summon it again. The panel, the
-speech bubble, and Rusty himself are all dressed by the
-active **skin** (menu: Skin): Tinplate (hand-painted cream windup, the
-default), Seafoam (the brushed sea-glass look), Midnight, and Sakura. Each
-skin recolors the sprite, panel, and bubble together; Shimeji packs still
-import for full third-party art. Exact commands run
-instantly: `open/launch <app>`, `switch to/focus <app>`, `hide <app>`,
-`quit <app>` (asks for a confirming Return), `move window left/right`,
-`maximize`, `center window`, `volume up/down`, `mute/unmute`,
-`play/next/previous`, `search <query>`, `shortcut <name>`. A grammar match
-only wins when its target exists, "open big brother on paramount plus"
-isn't an app, so it falls through to the smarter tiers, which route it as
-`open_url` to the right website (https-only, validated). The brains also
-carry the recent conversation (follow-ups like "now hide it" resolve), can
-type into the focused app (`type_text`) and fill the clipboard
-(`copy_text`). Window moves glide with an eased slide and report honestly
-when Accessibility isn't granted.
-
-**The agentic loop.** With a Claude key set, Rusty doesn't guess a plan up
-front: he runs a real tool-use loop, and answers **stream in word by word**
-as he writes them. Claude calls a tool, *sees the actual
-result*, and decides the next step, up to eight iterations, until the job
-is done. That is what makes him adapt instead of pretending: ask for an app
-that doesn't exist and he finds that out from the tool result, then offers
-the website or says plainly that it isn't installed. He can call `look`
-mid-loop to check his own work on screen. Each step narrates in the panel
-as it happens ("Opening Safari", "Searching for tin toys"). Every tool call
-lands on the same gated action a typed command would, so `quit`, dangerous
-AppleScript, and `run_admin` still stop the loop and wait for your Return
-(Esc declines that step and lets him adapt rather than killing the run).
-The system prompt and tool definitions are identical every iteration, so
-they are sent with a cache breakpoint and read from cache after the first
-call.
-
-**Screen sight.** Rusty can see your screen when you ask: "what's this
-error?", "read this to me", "what's on my screen?" route to `look`, which
-captures the screen, downsizes it, and sends it to Claude's vision so he
-answers from what is actually there. It is read-only and needs Screen
-Recording permission (macOS prompts on first use); the capture never leaves
-the vision request.
-
-Beyond the dedicated verbs, Claude has universal tools that cover nearly
-everything else: `run_applescript` (drive any scriptable app, System
-Events, Notes, Reminders, Calendar, timers, dark mode, and more),
-`press_keys` (any keyboard shortcut in the focused app), `screenshot`, and
-`run_admin` for the rare task that needs root. Scripts that delete things,
-touch the shell, or press keys pause in the panel with the exact script
-shown and a one-Return safety check; `run_admin` always pauses and then
-hands off to the macOS password dialog, so a privileged command needs two
-human checkpoints (your Return, then your password) and there is no stored
-credential or standing helper the agent could spend on its own.
-**Full Disk Access** (menu bar, Grant Full Disk Access) is optional and
-user-granted: with it on, those tools can reach protected files (Mail,
-Messages, Safari, other apps' containers) when you ask. "Test Claude
-Brain" in the menu fires a live round trip and reports whether the key,
-network, and wire format all work. Answers are not truncated: a real
-question gets a full reply (the panel scrolls, the voice reads it all),
-while a spoken quip riding a command stays short.
-
-Anything else goes to **on-device Apple Foundation Models** (macOS 26+,
-Apple Intelligence enabled, private, free, no network): "can you pull up
-safari for me little buddy" → routes to `open Safari` and Rusty answers in a
-the chat panel ("Beep boop, browser loaded!"). The model only ever PROPOSES a
-(verb, argument, reply); execution flows through the same gated pipeline and
-confirmation rules as typed commands, grounded in what Rusty can actually
-see (frontmost app, what he's standing on, open apps). Falls back gracefully
-when Apple Intelligence is off. Window moves use the same Accessibility
-capability as Voice Control, guarded and timed out like all AX here.
-
-**Claude brain (A5, optional, the smart tier):** paste an Anthropic API key
-(menu bar, "Anthropic API Key…", stored locally; or the ANTHROPIC_API_KEY env
-var) and everything the grammar can't parse goes to **claude-opus-5** before
-the on-device model. That upgrade is about answers, not just routing:
-"hey rusty, what's a monad" gets a real, accurate explanation in the bubble
-(Claude-tier replies get ~220 chars vs the on-device 90, spoken aloud).
-Wire format is the Anthropic Messages API with structured outputs, a JSON
-schema pins the `{verb, argument, reply}` shape so parsing can't drift, at
-effort "low" to keep voice latency conversational. Claude still only
-PROPOSES; the same gated verb pipeline executes, and `quit` keeps the typed
-double-⏎. Refusals and network failures fall through to the on-device tier
-automatically; a rejected key says so in the bubble. The menu bar shows which
-brain is live ("Brain: Claude (claude-opus-5)" / "On-Device (Apple)" /
-"Grammar Only"). Privacy: only your command text and a one-line context
-summary (frontmost app, open apps, where Rusty stands) are sent to
-Anthropic. Model overridable via the `anthropicModel` default.
-**"Hey Rusty" (A4)**: an always-on, on-device wake word (menu bar toggle).
-Say "hey rusty, mute the sound" in one breath and it routes directly; a bare
-"hey rusty" chimes and opens hands-free capture that ends on silence, the
-chat panel pops up with the live transcript (dimmed until final) and the
-reply, same as typing. And the conversation keeps going: after Rusty
-finishes speaking, the mic reopens for a follow-up with no new "hey rusty";
-staying quiet for a few seconds ends the chat gracefully. UI sounds are
-soft synthesized kalimba taps (struck-bar partials, nothing beepy), and
-they have a menu toggle (Chime Sounds).
-
-**Memory.** Rusty remembers between launches. Tell him a preference and he
-saves it himself (there are `remember` and `forget` tools he decides to
-call); it lands in a plain JSON file under Application Support that you can
-read, and the menu's "What Rusty Remembers" lists every fact with buttons to
-reveal the file or erase the lot. He is told never to save secrets. Recent
-exchanges carry over too, so a follow-up still resolves after a restart.
-
-**Cost.** The menu shows "Usage today", tokens and dollars, counted from the
-real usage numbers in the response stream and reset daily. Cached input is
-counted at its own cheaper rate, which is why the loop's cache breakpoint
-matters.
-
-**Custom skins.** Beyond the four built-ins, drop a JSON file in the skins
-folder (Skin menu, Open Skins Folder) to define your own: pick which robot
-finish to wear and set every panel and bubble color as hex. The folder is
-created with a working example and a README. Bad files are skipped and the
-reason is reported rather than silently vanishing. Costs
-are deliberate and visible: the mic stays open (persistent indicator) and
-continuous recognition uses some CPU while enabled, the published energy
-budgets apply to the wake-word-off configuration. It pauses during capture
-and on sleep/lock, and restarts its recognizer on a rolling basis.
-
-**Push-to-talk (A3): hold ⌥Space and speak**, the chat panel shows the
-live transcript while you talk; release to route it through the same brain.
-Recognition is on-device where the locale supports it, and the microphone
-runs only while the key is held: no always-on listening, no permanent mic
-indicator, zero idle cost. Replies are spoken aloud. Default provider is **free Microsoft
-neural TTS** (community edge-tts tool, keyless, unofficial-but-stable;
-voice `en-US-AnaNeural`, changeable via the `edgeVoice` default; requires a
-python3 with `pip install edge-tts`). Switch providers under menu bar, Voice:
-Free / ElevenLabs / System. **ElevenLabs** is kept on the back burner, one
-click re-enables Jessica when a key is set (menu bar, "ElevenLabs API Key…", stored locally; or the
-ELEVENLABS_API_KEY env var; voice/model overridable via the
-`elevenLabsVoice`/`elevenLabsModel` defaults), with the best installed
-system voice as the automatic fallback for no-key, network, or quota
-failures (the picker prefers premium > enhanced > compact voices, download
-a nicer one under System Settings → Accessibility → Spoken Content → System
-Voice → Manage Voices and Rusty will use it automatically). A dev `.env`
-(gitignored) with `elevenlabs=<key>` can be imported via
-`defaults write com.funproject.windowpet elevenLabsKey ...`. Only Rusty's short
-replies are sent to ElevenLabs, your speech is recognized on-device. Toggle
-"Spoken Replies" in the menu bar to silence him. Destructive verbs from voice
-park in the panel with a safety check, press Return there to confirm. First use prompts
-for Microphone and Speech Recognition permissions.
-
-## Never out of bounds
-
-The visible body touches screen edges exactly (clamps use the drawn body's
-edge, not the sprite canvas); airborne arcs bonk on the menu-bar/notch line
-instead of exiting the top; falling stays over the floor span; edges too
-high for the body flip him into a ceiling hang; and a visibility watchdog
-relocates a resting pet if it's ever mostly offscreen for a few seconds.
-
-## Shimeji packs (S5, the ecosystem unlock)
-
-Any shimeji-ee character pack (`conf/actions.xml` + `img/*.png`) can be the
-pet, **their art, our brain**:
-
-```bash
-swift run -c release WindowPet -- --character /path/to/SomeShimejiPack
+Tests/WindowPetCoreTests/   131 tests, all against the pure core
+Tools/                      Character design sheets, app and DMG packaging, energy benchmark
+ENERGY.md                   Generated by Tools/energy-bench.sh
 ```
 
-The choice persists (`--character builtin` returns to Rusty; the menu bar
-shows the active character). The importer parses the pack's actions.xml
-(English shimeji-ee schema), maps Stand/Walk/Falling/Bouncing/Sit/Pinched onto
-WindowPet's animation kinds with fallback chains, converts tick durations
-(~40 ms each), honors the faces-left art convention, and builds alpha masks , 
-imported characters are immediately boopable, grabbable, and throwable. The
-pack's behaviors.xml is deliberately ignored: the GOBT engine drives every
-character. Characters hot-swap at runtime without interrupting whatever the
-pet is doing. (Japanese-schema packs and per-pose anchors: future work.)
+`swift test` covers `WindowPetCore` only. There is no unit test target for the app itself, which is
+exactly why `--testrig` exists.
 
-## Reactions (S6, app awareness as personality)
+## The character
 
-Every reaction derives from real, observable system state, never randomness:
+Rusty, a mid-century tin toy robot: teal body, silver faceplate, cyan LED eyes that go alarm-orange
+while falling and dim to slits when blinking, a chest dial, rivets, and an antenna bobble that sways
+with the walk. Four alternative finishes ship with the app, and skins can be authored as plain JSON.
 
-- **Immersion nap**: the frontmost window covering ≥98.5% of the screen
-  (fullscreen video, deliberately above "maximized") sends the pet to the
-  floor, a shuffle toward the edge, and a quiet nap until it ends. Being
-  net-positive during focused work is the category's survival rule.
-- **Build agitation**: window-title-change *frequency* (a compiling Terminal,
-  progress titles) sensed via Tier-2 `kAXTitleChanged` events, rate only,
-  the title text is never read. The pet paces on the busy window, watching.
-- **Distraction closed**: quitting Slack/Discord/Teams earns celebratory hops.
-- **Welcome back**: mouse activity after 90+ seconds away gets a greeting hop
-  and satisfies the attention need.
+Art is a build input rather than runtime drawing.
+[`Tools/chargen.swift`](Tools/chargen.swift) holds ten candidate designs. Any shimeji-ee sprite
+pack can be imported and hot swapped while the creature is running: their art, this engine.
 
-Thresholds live in [ReactionPolicy.swift](Sources/WindowPetCore/ReactionPolicy.swift)
-(pure, unit-tested, incl. the decaying-rate math). Reaction statuses hold
-briefly so routine transitions can't stomp them; activation-chasing yields to
-sleep, immersion, and in-flight errands.
+## Status
 
-## Architecture (two-tier window model)
+Built, running, and packaged locally as an app bundle and a drag-to-Applications DMG (2.8 MB).
+`codesign --verify --deep --strict` passes. It is **not ready to hand to anyone else**, and the
+reasons are specific.
 
-- **Tier 1 (built): `CGWindowListCopyWindowInfo`**, bounds + z-order for every
-  window, zero permissions. Physics/geometry floor. Polled adaptively:
-  60 Hz only while the target frame is actually changing, 10 Hz settled,
-  4 Hz after 20 s of stillness, 2 Hz with no target. Single-window queries
-  (`.optionIncludingWindow`) in the hot loop; full-list queries only on
-  retarget and a 1 Hz topmost audit. Retargets are event-driven
-  (`NSWorkspace` activation / Space-change notifications), and everything
-  suspends on sleep/screen-lock.
-- **Tier 2 (built, S3): `AXObserver` as a read-free event stream**, window
-  moved/resized/created/focused/miniaturized notifications per observed app.
-  Events are never trusted for geometry; they mean "consult Tier 1 now":
-  instant motion wake for the ridden window (vs ≤100 ms watch latency),
-  audit nudges for structural changes (rate-limited, busy Electron renderers
-  spam these). Hardening: 100 ms messaging timeouts on every element, exactly
-  one guarded AX read per app (attach-time window probe), evidence-based
-  Electron handling (silent-through-probation while Tier 1 sees motion →
-  force `AXManualAccessibility` → still silent → mark degraded, judged by
-  `Tier2Policy` in Core under unit test), per-app capability matrix in the
-  status menu and `--diag`, LRU cap of 6 observers, detach on app quit.
-  If AX fails for an app, the pet still stands on it correctly, it just has
-  no event-driven opinions about it.
-- **Accessibility onboarding**: zero-prompt by default. Tier 2 enables
-  silently if the process is already trusted; otherwise the menu bar offers
-  "Enable window senses…", which fires the system prompt and polls for the
-  grant (there is no notification) so it lights up without a restart.
+**Distribution, in the order it needs fixing:**
 
-**Permission invariant:** we never read `kCGWindowName` / `kCGWindowOwnerName`
-(they trip the Screen Recording prompt on macOS 15+). Bounds, layer, PID, and
-window number are free. `grep -rn "kCGWindowOwnerName" Sources/` must only ever
-hit the comment in `Tier1.swift`. App identity for the status item comes from
-`NSRunningApplication` (local, unrestricted).
+- **The signature is a development certificate, not a distribution one.** The app is signed
+  `Apple Development: j.edusei@icloud.com`, team `PK389W6V96`. Distribution requires a
+  Developer ID Application certificate, which requires Apple Developer Program enrollment.
+- **It is not notarized**, and cannot be until the certificate above changes. `spctl` currently
+  rejects both the app and the DMG. On anyone else's Mac this DMG trips Gatekeeper.
+- **The DMG itself is unsigned**, and no notarization ticket is stapled to it.
+- **Hardened runtime is off** on the current build, because `make-app.sh` took its fallback branch.
+  Turning it on is one flag, and notarization requires it anyway.
+- **There is no version tag in git.** The `1.0.0` in the app's Info.plist is not backed by a tag or
+  a release.
 
-The overlay is a borderless, non-activating `NSPanel` (`.floating`,
-`canJoinAllSpaces + fullScreenAuxiliary + stationary`, click-through), it can
-never steal focus or eat a click.
+`Tools/make-app.sh` already prefers a Developer ID identity and applies the hardened runtime when
+one is present, so this is an enrollment problem rather than a code problem.
 
-Layout: `WindowPetCore` (pure geometry/cadence math, headless-testable) ·
-`WindowPet` (app) · `PetGen` (sprite generator). The CG↔AppKit coordinate flip
-(top-left vs bottom-left origin, anchored to `NSScreen.screens[0]`) lives in
-`Geometry.swift` with unit tests, it is the classic bug in this domain.
+**Other known gaps:**
 
-## Measured energy (2026-08-19, M5 Pro, release build, stage 2 final)
+- **The wake word's energy cost is unmeasured**, for the reason given above. Granting the installed
+  app Microphone and Speech Recognition permission and re-running the benchmark is the fix.
+- **`ENERGY.md` is overwritten by `energy-bench.sh`.** The hand-written note about the wake word
+  measurement sits below the generated block and will be destroyed by the next run.
+- **The planner travel phase of the rig is timing sensitive** under load, as described above.
+- **No screen recording or demo clip exists**, which for a project whose entire pitch is visual is
+  the single most valuable missing asset.
+- **Apple silicon only.** The build is thin arm64, not universal.
 
-| State | CPU | Notes |
-|---|---|---|
-| Perched, still (incl. breathing) | 0.0–0.5% | budget <0.3%, met at rest; breathing ticks show ≤0.5 in 2 s samples; tune in S7 |
-| Walk bursts (1.5–3.5 s, every 4–9 s) | **0.9–2.8%** | budget <3% ✓, was ~4–5% when the sprite was its own moving window; GPU layer moves fixed it |
-| Held by the mouse | ~0% | display link paused, purely event-driven |
-| Memory | ~48 MB RSS | budget <80 MB ✓ |
+---
 
-Re-measure: `top -pid $(pgrep -x WindowPet) -l 6 -s 2 -stats cpu,mem,command`
-or (needs sudo) `sudo powermetrics --samplers tasks -i 5000 -n 3 | grep WindowPet`.
-
-## Verification
-
-- `swift test`, 131 tests: coordinate math, terrain occlusion/segmentation,
-  landing selection, gravity integration, leap-solver accuracy (integrated
-  numerically to ≤1.5 pt), rate-policy bands.
-- `--testrig`, 93/93, eight parts (ceiling hang, speech bubbles). Shimeji part: writes a schema-exact
-  synthetic pack to disk, imports it, asserts the action mapping (walk ×3,
-  Bouncing→land ×2, Pinched→jump, sleep falls back to idle, 6 ticks → 0.24 s,
-  faces-left), hot-swaps it onto the live pet mid-run, verifies the
-  click-through hole against the imported alpha, and swaps back. Others, rebuilt as a sequential step runner:
-  every step acts and then polls a condition until it holds or times out, so
-  load spikes on a live machine become waits instead of flakes. Reactions
-  part: real fullscreen-window immersion → retreat + nap → wake on close;
-  celebration and greeting through the same code paths the real signals use;
-  cross-process title-spam sensed at rate ≥0.8/τ; agitated pacing on the hot
-  window; full quiescence after decay. Earlier parts: Behavior: a seeded brain with forced
-  needs travels to a high window via a genuine 2-step planned route (leap
-  the mid shelf, leap the target), sleeps on exhaustion with the display
-  link verified paused, and wakes on recharge. Earlier parts: Tier 2: attaches an observer to a helper
-  process (`--helper-window`) that wiggles a titled window, asserts real
-  cross-process AX events arrive and drive the engine's wake pipeline; the
-  riding phase also exercises the organic path (standing on a window
-  auto-attaches, and the drag's first AX event wakes tracking instantly).
-  Skips loudly without Accessibility. Earlier parts: Window terrain: spawn-fall onto a window,
-  close-→-fall-→-land on the window below, walking staying on the edge,
-  ballistic leap onto a higher window, occlusion eviction, riding a moving
-  window (Δx exact). Floor terrain: sprite-feet/anchor coherence, the alpha
-  hole (opens on body pixels, stays shut between the feet and in empty air),
-  wall climb with ±90° rotation and leap-off, grab → drag → throw physics,
-  and clock quiescence. Rig windows are borderless and the rig runs as an
-  accessory app, both deliberate: environments that suppress background
-  titled/regular-app windows (fullscreen video, Focus) still map these, so
-  the rig runs everywhere. Terrain is restricted to the rig's own PID so the
-  live desktop can't perturb it. Tier 2: a second `--helper-window` process
-  opens a titled window and wiggles it, so the observer sees real
-  cross-process AX notifications, the rig asserts attach, non-degraded
-  health, ≥3 `kAXWindowMoved` events in 1.6 s, and that the engine's wake
-  pipeline fired. Those phases skip cleanly, and say so, when Accessibility
-  isn't granted, so the rig still passes on a clean machine.
-
-## Shipping
-
-`bash Tools/make-app.sh` builds and signs WindowPet.app (Developer ID if
-present, else the Apple Development identity, so permission grants persist
-across rebuilds). `bash Tools/make-dist.sh` wraps it in a
-drag-to-Applications DMG. First launch shows a short welcome that explains
-the permissions. The menu has Start at Login and About. For public
-distribution, enroll in the Apple Developer Program, add a Developer ID
-Application certificate, and notarize the DMG (commands in the script
-headers); everything else is already in place.
-
-## Next
-
-- Grant Accessibility, Microphone, and Speech once to the installed app;
-  the Apple Development signature keeps them sticky. Then measure
-  wake-word-on CPU for ENERGY.md.
-- Notarization once enrolled in the Apple Developer Program.
-- Later: learned associations (S6b), Japanese-schema Shimeji packs +
-  per-pose anchors (S5b), ElevenLabs credit monitor, custom skin editor.
-
-## License
-
-MIT, see [LICENSE](LICENSE).
+Jalen Edusei, [jalenedusei.com](https://www.jalenedusei.com),
+[github.com/jke48222](https://github.com/jke48222)
