@@ -1,10 +1,9 @@
 # WindowPet
 
 A macOS desktop creature that is genuinely aware of real windows. It sits on
-title bars, rides windows as you drag them, and (eventually) falls when you
-close one and reacts to specific apps.
+title bars, rides windows as you drag them, and falls when you close one.
 
-**Status: Stage 2 complete** — the pet is a physical, touchable creature in a
+**Status: Stage 3 complete** — the pet is a physical, touchable creature in a
 world made of window tops, screen floors, and screen-edge walls: it
 spawn-drops onto your frontmost window, rides it as you drag, walks along
 title bars (sometimes strolling right off the edge), falls with gravity when
@@ -14,14 +13,17 @@ because the overlay is click-through except over actual creature pixels — you
 can boop it with a click, or pick it up with the mouse and throw it. 16
 procedurally generated animation frames. Still zero permission prompts.
 
+Stage 3 added the Accessibility tier: with permission granted (opt-in, from
+the status-bar menu — the app never prompts on its own), `AXObserver` events
+wake the tracker the instant a window moves instead of waiting for the poll.
+Without it, everything above still works exactly the same on Tier 1 alone.
+
 **The character is Rusty**, a mid-century tin toy robot: teal tin body,
 silver faceplate, cyan LED eyes (alarm-orange while falling, powered-off
 slits when blinking or mid-landing-squash), chest dial, rivets, and an
 antenna bobble that sways with the walk gait. Ten candidate designs live in
 `Tools/chargen.swift`; the picker sheets came from `Tools/chargen.swift` and
 `Tools/doggen.swift`.
-
-Research dossier: `../PASS-2-macos-software-research.md`, PROJECT 9.
 
 ## Run it
 
@@ -34,8 +36,8 @@ Quit via the 🐾 status-bar menu (also shows which app the pet is riding), or
 
 ```bash
 swift run WindowPet -- --diag 6      # verbose target/tracking log for 6s, then exits
-swift run WindowPet -- --testrig     # self-driving e2e check (opens+animates its own window), exits 0/1
-swift test                           # geometry + cadence unit tests
+swift run WindowPet -- --testrig     # self-driving e2e check (opens+animates its own windows), exits 0/1
+swift test                           # geometry, physics, terrain + Tier-2 policy unit tests
 ```
 
 Regenerate the placeholder sprite (or just replace `Sources/WindowPet/Resources/pet.png`
@@ -45,7 +47,7 @@ with real art — the app only loads the PNG):
 swift run PetGen Sources/WindowPet/Resources/pet.png
 ```
 
-## How the creature works (stage 2)
+## How the creature works
 
 - **Terrain** ([Terrain.swift](Sources/WindowPetCore/Terrain.swift)): every
   on-screen window's top edge, split into exposed segments by z-order
@@ -82,10 +84,19 @@ swift run PetGen Sources/WindowPet/Resources/pet.png
   retarget and a 1 Hz topmost audit. Retargets are event-driven
   (`NSWorkspace` activation / Space-change notifications), and everything
   suspends on sleep/screen-lock.
-- **Tier 2 (next): `AXUIElement`/`AXObserver`** — event-driven frame-accurate
-  updates plus semantics, per-app, with the full hardening matrix (messaging
-  timeouts, Electron `AXManualAccessibility`, crash guards). Personality layer.
-  If AX fails for an app, Tier 1 still places the pet correctly.
+- **Tier 2 (built): `AXUIElement`/`AXObserver`** — event-driven frame-accurate
+  updates, per-app, opt-in behind Accessibility. Attach is lazy (the ridden
+  app plus newly activated ones), capped at six observers with LRU eviction,
+  and released when an app quits. The hardening matrix is the whole point: a
+  100 ms messaging timeout on every element (the default would hang the pet
+  against a beachballing app), every AX call error-checked, exactly one read
+  in the entire layer (the attach-time window probe), and nothing on the
+  render path. Events never carry geometry — they only mean "consult Tier 1
+  now", so Tier 1 stays the single source of truth and an app whose AX tree
+  lies cannot move the pet. Apps that stay silent while Tier 1 sees motion get
+  the Electron `AXManualAccessibility` hook, then are marked degraded and left
+  alone ([Tier2Policy.swift](Sources/WindowPetCore/Tier2Policy.swift),
+  unit-tested). If AX fails for an app, Tier 1 still places the pet correctly.
 
 **Permission invariant:** we never read `kCGWindowName` / `kCGWindowOwnerName`
 (they trip the Screen Recording prompt on macOS 15+). Bounds, layer, PID, and
@@ -116,10 +127,11 @@ or (needs sudo) `sudo powermetrics --samplers tasks -i 5000 -n 3 | grep WindowPe
 
 ## Verification
 
-- `swift test` — 16 tests: coordinate math, terrain occlusion/segmentation,
+- `swift test` — 22 tests: coordinate math, terrain occlusion/segmentation,
   landing selection, gravity integration, leap-solver accuracy (integrated
-  numerically to ≤1.5 pt), rate-policy bands.
-- `--testrig` — 50/50, two parts. Window terrain: spawn-fall onto a window,
+  numerically to ≤1.5 pt), rate-policy bands, and the Tier-2 health policy
+  (probation, contradiction, degradation).
+- `--testrig` — 54/54, three parts. Window terrain: spawn-fall onto a window,
   close-→-fall-→-land on the window below, walking staying on the edge,
   ballistic leap onto a higher window, occlusion eviction, riding a moving
   window (Δx exact). Floor terrain: sprite-feet/anchor coherence, the alpha
@@ -129,12 +141,20 @@ or (needs sudo) `sudo powermetrics --samplers tasks -i 5000 -n 3 | grep WindowPe
   accessory app — both deliberate: environments that suppress background
   titled/regular-app windows (fullscreen video, Focus) still map these, so
   the rig runs everywhere. Terrain is restricted to the rig's own PID so the
-  live desktop can't perturb it.
+  live desktop can't perturb it. Tier 2: a second `--helper-window` process
+  opens a titled window and wiggles it, so the observer sees real
+  cross-process AX notifications — the rig asserts attach, non-degraded
+  health, ≥3 `kAXWindowMoved` events in 1.6 s, and that the engine's wake
+  pipeline fired. Those phases skip cleanly, and say so, when Accessibility
+  isn't granted, so the rig still passes on a clean machine.
 
-## Next (per dossier roadmap)
+## Next
 
-- S3 — AX Tier 2: `AXObserver` event-driven tracking with the full hardening
-  matrix (messaging timeouts, Electron `AXManualAccessibility`, crash
-  guards), AX-permission onboarding.
-- Then: GOBT behavior engine (S4), Shimeji XML import (S5), app reactions
-  (S6), energy CI + `powermetrics` publishing (S7), notarized DMG (S8).
+- S4 — GOBT behavior engine: goal-oriented behaviour trees, so the pet picks
+  what to do next instead of running a random-interval scheduler.
+- Then: Shimeji XML import (S5), per-app reactions (S6), energy CI +
+  `powermetrics` publishing (S7), notarized DMG (S8).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
