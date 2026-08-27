@@ -23,3 +23,11 @@ Note when re-measuring: run the **installed** binary, not `swift run`. TCC
 permissions and preferences are keyed to the signing identity and bundle, so
 the development binary reports its own (empty) permissions and its own
 defaults domain, which also hides the configured API key.
+
+## Measure on a quiet machine (2026-08-27)
+
+A run taken while builds are compiling is not a measurement. The same build
+reported 0.56% sleep and 1.30% perched, both budget failures, with release
+builds running alongside it, and 0.25% and 0.44% ninety seconds later with the
+machine settled. Check `uptime` first; the test rig's window-choreography
+phases fail the same way and for the same reason.

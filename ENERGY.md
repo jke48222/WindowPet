@@ -1,17 +1,28 @@
 # WindowPet: Measured Energy
 
-Measured 2026-08-19 on Apple M5 Pro, macOS 27.0, release build.
+Measured 2026-08-27 on Apple M5 Pro, macOS 27.0, release build.
 Method: self-reported `getrusage` CPU over 15s deterministic phases
 (driven by the same debug hooks as the test rig); RSS via `task_info`.
 Overall: **PASS**
 
 | Phase | What | CPU | Budget | RSS |
 |---|---|---|---|---|
-| sleep | pet asleep, nothing moving | **0.24%** | ≤ 0.3% (hard) | 47.7 MB |
-| perched | awake on a title bar, breathing/blinking | 0.42% | ≤ 1.0% (soft) | 47.6 MB |
-| active | continuous planned travel between two windows | **1.04%** | ≤ 3.0% (hard) | 48.5 MB |
+| sleep | pet asleep, nothing moving | **0.25%** | ≤ 0.3% (hard) | 44.1 MB |
+| perched | awake on a title bar, breathing/blinking | 0.44% | ≤ 1.0% (soft) | 44.0 MB |
+| active | continuous planned travel between two windows | **1.04%** | ≤ 3.0% (hard) | 44.9 MB |
 
 RSS budget: ≤ 80 MB (hard).
+
+Measured again on 2026-08-27 after the clipboard history was added, since that
+introduced a 1 Hz poll into the idle path. The numbers are unchanged within
+noise: sleep 0.24% to 0.25%, perched 0.42% to 0.44%, active 1.04% both times.
+
+One caveat worth writing down, because it cost two false alarms: **a run taken
+while the machine is busy is not a measurement.** The same build measured
+0.56% sleep and 1.30% perched, a hard-budget failure, while release builds were
+compiling alongside it, and 0.25% and 0.44% ninety seconds later with the
+machine settled. Quit everything and check `uptime` before believing a
+regression here.
 
 Reproduce: `Tools/energy-bench.sh [secondsPerPhase]`, which exits nonzero on
 any hard-budget violation (CI-ready). External cross-check:

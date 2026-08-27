@@ -26,11 +26,33 @@ public enum AssistantAction: Equatable {
     case runAdminShell(String)     // root via the macOS password prompt; always confirms
     case runShortcut(String)
 
+    // Awareness and arrangement. All read-only or reversible, so none of them
+    // gate; the destructive verbs above are still the only ones that stop.
+    case listWindows
+    case placeWindows([WindowPlacement])
+    case saveLayout(String)
+    case applyLayout(String)
+    case listLayouts
+    case watchApp(app: String, reason: String)
+    case listWatches
+    case stopWatching(String)
+    case listClips
+    case recallClip(String)
+    /// Reading a path the model chose on its own. The drop path does not use
+    /// this: dropping a file is consent by the act, while a model asking for
+    /// an arbitrary path is exactly what a prompt injection would try.
+    case readFile(String)
+    /// A tool from an MCP server. `trusted` comes from mcp.json, so trusting a
+    /// server is a decision written down rather than one the model can take.
+    case mcpCall(server: String, tool: String, arguments: String, trusted: Bool)
+
     public var needsConfirmation: Bool {
         switch self {
         case .quitApp: return true
         case .runAppleScript(let script): return AssistantRouting.isDangerousScript(script)
         case .runAdminShell: return true  // privileged: never runs without a human Return + password
+        case .readFile: return true       // an arbitrary path is worth one Return
+        case .mcpCall(_, _, _, let trusted): return !trusted
         default: return false
         }
     }
@@ -43,6 +65,10 @@ public enum AssistantAction: Equatable {
         case .runAppleScript(let script): return "Run AppleScript: \(script.prefix(220))"
         case .runAdminShell(let cmd):
             return "Run as administrator (macOS will ask for your password): \(cmd.prefix(200))"
+        case .readFile(let path): return "Read the file at \(path)"
+        case .mcpCall(let server, let tool, let arguments, _):
+            let detail = arguments.isEmpty || arguments == "{}" ? "" : " with \(arguments.prefix(160))"
+            return "Run \(tool) on the \(server) server\(detail)"
         default: return nil
         }
     }
@@ -59,6 +85,8 @@ public enum AssistantRouting {
         "play_pause", "next", "previous", "search", "open_url",
         "type_text", "copy_text", "press_keys", "screenshot",
         "run_applescript", "run_admin", "look", "remember", "forget", "shortcut",
+        "windows", "place_windows", "save_layout", "layout", "layouts",
+        "watch", "watches", "unwatch", "clips", "recall_clip", "read_file",
     ]
     // "look" is a Claude-only capability (it needs vision), so it's a valid
     // schema verb but has no AssistantAction: the brain intercepts it and
@@ -117,8 +145,40 @@ public enum AssistantRouting {
         case "run_admin", "sudo", "admin":
             return arg.isEmpty ? nil : .runAdminShell(arg)
         case "shortcut": return arg.isEmpty ? nil : .runShortcut(arg)
+        case "windows": return .listWindows
+        case "place_windows", "arrange":
+            let placements = LayoutParser.placements(from: arg)
+            return placements.isEmpty ? nil : .placeWindows(placements)
+        case "save_layout": return arg.isEmpty ? nil : .saveLayout(arg)
+        case "layout": return arg.isEmpty ? nil : .applyLayout(arg)
+        case "layouts": return .listLayouts
+        case "watch":
+            // "Xcode until the build finishes" splits into the app to watch
+            // and the reason to repeat back when it fires.
+            let (app, reason) = AssistantRouting.splitReason(arg)
+            return app.isEmpty ? nil : .watchApp(app: app, reason: reason)
+        case "watches": return .listWatches
+        case "unwatch": return arg.isEmpty ? nil : .stopWatching(arg)
+        case "clips": return .listClips
+        case "recall_clip": return .recallClip(arg)
+        case "read_file": return arg.isEmpty ? nil : .readFile(arg)
         default: return nil
         }
+    }
+
+    /// Splits "Xcode until the build finishes" into the app and the reason.
+    /// The separators are the words people actually use, and everything before
+    /// the first one is the app, so an app name with spaces survives.
+    public static func splitReason(_ raw: String) -> (app: String, reason: String) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        for separator in [" until ", " for ", " and tell me ", " to see ", " because "] {
+            if let range = text.range(of: separator, options: .caseInsensitive) {
+                return (String(text[text.startIndex..<range.lowerBound])
+                            .trimmingCharacters(in: .whitespaces),
+                        String(text[range.upperBound...]).trimmingCharacters(in: .whitespaces))
+            }
+        }
+        return (text, "")
     }
 
     /// Scripts that touch the shell, files, sessions, or power state need a

@@ -164,8 +164,10 @@ public final class StreamAccumulator {
                 // (web search and fetch) already ran on Anthropic's side and
                 // must never get a tool_result from us.
                 if block.type == "tool_use" {
-                    calls.append(ClaudeAgent.ToolCall(id: block.id, name: block.name,
-                                                      argument: (input["argument"] as? String) ?? ""))
+                    calls.append(ClaudeAgent.ToolCall(
+                        id: block.id, name: block.name,
+                        argument: (input["argument"] as? String) ?? "",
+                        rawArguments: ClaudeAgent.ToolCall.encode(input: input)))
                 }
             default:
                 // Server tool results and anything else unrecognized are

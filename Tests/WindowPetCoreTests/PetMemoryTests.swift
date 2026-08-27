@@ -102,7 +102,7 @@ final class PetMemoryTests: XCTestCase {
         XCTAssertEqual(restored, memory)
     }
 
-    func testMemoryToolsAreRoutedInternally() {
+    @MainActor func testMemoryToolsAreRoutedInternally() {
         // remember/forget are handled by the agent, not the executor, so they
         // must not map to an AssistantAction.
         XCTAssertTrue(ClaudeAgent.internalVerbs.contains("remember"))

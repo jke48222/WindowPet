@@ -16,11 +16,28 @@ public enum ClaudeAgent {
     public struct ToolCall: Equatable {
         public let id: String
         public let name: String
+        /// The built-in verbs all take one string, so this is what they read.
         public let argument: String
-        public init(id: String, name: String, argument: String) {
+        /// The whole input object as JSON. MCP tools carry their server's own
+        /// schema, which can be any shape at all, so a single string would
+        /// throw away most of what the model sent.
+        public let rawArguments: String
+
+        public init(id: String, name: String, argument: String, rawArguments: String = "{}") {
             self.id = id
             self.name = name
             self.argument = argument
+            self.rawArguments = rawArguments
+        }
+
+        /// Serializes a tool_use block's input, keeping keys sorted so the
+        /// same call always produces the same string.
+        public static func encode(input: [String: Any]?) -> String {
+            guard let input, !input.isEmpty,
+                  let data = try? JSONSerialization.data(withJSONObject: input,
+                                                         options: [.sortedKeys]),
+                  let text = String(data: data, encoding: .utf8) else { return "{}" }
+            return text
         }
     }
 
@@ -73,12 +90,28 @@ public enum ClaudeAgent {
         "shortcut": "Run a Shortcuts automation by name. Argument: the shortcut name.",
         "remember": "Save a durable fact about this person for future conversations. Argument: the fact, in your own words ('prefers Safari over Chrome'). Call this when they tell you a preference, a name, a workflow, or how they want things done. Do not save secrets, passwords, or anything they would not want written to disk.",
         "forget": "Remove remembered facts. Argument: words identifying what to drop, or 'everything' to clear it all. Call this when they ask you to forget something.",
+        "windows": "See every window that is open: which apps, how many, what size, and where on screen. Argument: empty. Call this before answering anything about the user's screen layout or tidying it, and before arranging windows, so you know what is actually there.",
+        "place_windows": "Arrange windows. Argument: app and position pairs like 'Safari left, Terminal bottom right'. Positions are left, right, top, bottom, the four corners, center, full, and left/middle/right third. Call windows first if you are not sure what is open.",
+        "save_layout": "Remember how the windows are arranged right now, under a name. Argument: the name.",
+        "layout": "Restore a saved arrangement. Argument: its name.",
+        "layouts": "List the saved arrangements. Argument: empty.",
+        "watch": "Keep an eye on an app and tell the user when it goes quiet or quits. Argument: the app, optionally followed by 'until' and what they are waiting for, like 'Xcode until the build finishes'. Call this for any 'tell me when' request. It returns immediately; the user is told later, so do not wait or poll.",
+        "watches": "List what you are currently watching. Argument: empty.",
+        "unwatch": "Stop watching something. Argument: the app name, or 'everything'.",
+        "clips": "See what the user has copied recently, newest first. Argument: empty. Call this when they ask what they copied or want something back.",
+        "recall_clip": "Put an earlier clip back on the clipboard. Argument: its number from the clips list, or words that appear in it.",
+        "read_file": "Read a file or list a folder. Argument: the path. The user must confirm this one, so call it only when they clearly asked about a specific file. A file they dropped on you is already in the conversation; do not call this for it.",
     ]
 
     /// Tools the agent handles itself rather than routing to the executor.
     public static let internalVerbs: Set<String> = ["look", "remember", "forget"]
 
-    public static var toolDefinitions: [[String: Any]] {
+    /// Tools from connected MCP servers, injected by the app at launch. Kept
+    /// here rather than passed through every call site so the schema the model
+    /// sees is assembled in exactly one place.
+    @MainActor public static var mcpTools: [[String: Any]] = []
+
+    @MainActor public static var toolDefinitions: [[String: Any]] {
         AssistantRouting.verbs.filter { $0 != "none" }.map { verb in
             [
                 "name": verb,
@@ -94,7 +127,7 @@ public enum ClaudeAgent {
                     "required": ["argument"],
                 ],
             ]
-        } + serverTools
+        } + serverTools + mcpTools
     }
 
     /// Anthropic-hosted tools. These run on Anthropic's side: they arrive as
@@ -125,6 +158,12 @@ public enum ClaudeAgent {
     to read a specific page. Do that before answering rather than guessing \
     or telling the user to go look it up themselves. Cite what you found \
     plainly, in your own words.
+
+    You can see the windows on the screen you stand on: how many, which \
+    apps, what size, where. Call windows before answering anything about \
+    the screen or rearranging it, rather than guessing. You never see window \
+    titles or their contents, only geometry, so say so plainly instead of \
+    pretending otherwise; call look when you need to read what is on screen.
 
     You work by calling tools, one step at a time. After each tool you see \
     the result, so check it and adapt: if an app was not found, try the web \
@@ -158,6 +197,7 @@ public enum ClaudeAgent {
     /// tools+system prefix a cache read after the first call. Effort is
     /// "medium": the agent loop wants better judgment than one-shot routing,
     /// while a desktop assistant still has to feel quick.
+    @MainActor
     public static func agentRequest(messages: [[String: Any]], apiKey: String,
                                     model: String = ClaudeRouting.defaultModel,
                                     stream: Bool = false) -> ClaudeRouting.RequestSpec? {
@@ -189,7 +229,8 @@ public enum ClaudeAgent {
                       let name = block["name"] as? String else { return nil }
                 let input = block["input"] as? [String: Any]
                 return ToolCall(id: id, name: name,
-                                argument: (input?["argument"] as? String) ?? "")
+                                argument: (input?["argument"] as? String) ?? "",
+                                rawArguments: ToolCall.encode(input: input))
             }
             return resolveTurn(text: ClaudeRouting.joinedText(in: content), calls: calls,
                                rawContent: content, stopReason: stopReason)

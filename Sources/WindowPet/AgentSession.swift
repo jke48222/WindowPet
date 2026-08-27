@@ -212,6 +212,26 @@ final class AgentSession {
                 results.append((id: call.id, text: "Done.", isError: false))
                 continue
             }
+            // A tool from an MCP server. Routed before the verb table, since
+            // its name is qualified and belongs to no built-in verb, and it
+            // still becomes a gated AssistantAction so trust stays a config
+            // decision rather than the model's to make.
+            if let (server, tool) = MCPProtocol.split(qualified: call.name),
+               AssistantExecutor.shared.mcp.connectedNames.contains(server) {
+                let action = AssistantAction.mcpCall(
+                    server: server, tool: tool, arguments: call.rawArguments,
+                    trusted: AssistantExecutor.shared.mcp.isTrusted(server: server))
+                if action.needsConfirmation {
+                    pending = (action: action, callId: call.id, collected: results,
+                               remaining: Array(calls.dropFirst(index + 1)))
+                    return .needsConfirmation(action,
+                                              summary: action.confirmationSummary ?? "Confirm this step")
+                }
+                let (result, ok) = AssistantExecutor.executeChecked(action)
+                onProgress?("Ran \(tool) on \(server)")
+                results.append((id: call.id, text: result, isError: !ok))
+                continue
+            }
             // Internal verbs are handled by the branches above; if one is
             // ever added to ClaudeAgent.internalVerbs without a branch here,
             // fail loudly rather than routing it to the executor, which would

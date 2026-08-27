@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import QuartzCore
 import WindowPetCore
 
 /// Executes gated AssistantActions. Window moves use the Accessibility trust
@@ -8,6 +9,20 @@ import WindowPetCore
 /// human line for the command bar.
 @MainActor
 enum AssistantExecutor {
+
+    /// The long-lived pieces the verbs above reach for: a watch registry that
+    /// keeps ticking after the turn ends, a clipboard history that has been
+    /// recording since launch, and the MCP servers. They are state the app
+    /// owns, not state a single command creates, so they live in one place
+    /// the executor and the app delegate both address.
+    @MainActor
+    final class Services {
+        let watches = WatchRegistry()
+        let clipboard = ClipboardHistory()
+        let mcp = MCPHost()
+    }
+
+    static let shared = Services()
 
     static func execute(_ action: AssistantAction) -> String {
         executeChecked(action).result
@@ -39,6 +54,52 @@ enum AssistantExecutor {
             return ("Asked \(app.localizedName ?? name) to quit", true)
         case .windowMove(let move):
             return (moveFrontWindow(move), true)  // honest message either way; LLMs can't fix permissions
+
+        // MARK: awareness and arrangement
+
+        case .listWindows:
+            return (WindowInventory.report(), true)
+        case .placeWindows(let placements):
+            return (WindowArranger.apply(placements), true)
+        case .saveLayout(let name):
+            let placements = WindowArranger.capture()
+            guard !placements.isEmpty else {
+                return ("There are no windows open for me to remember.", false)
+            }
+            let layout = WindowLayout(name: name.trimmingCharacters(in: .whitespaces),
+                                      placements: placements)
+            LayoutStore.store(layout)
+            return ("Saved \(layout.summary)", true)
+        case .applyLayout(let name):
+            guard let layout = LayoutStore.named(name) else {
+                return ("I don't have a layout called \(name).", false)
+            }
+            return (WindowArranger.apply(layout.placements), true)
+        case .listLayouts:
+            return (LayoutStore.listing(), true)
+
+        case .watchApp(let app, let reason):
+            let message = shared.watches.watch(app: app, reason: reason, now: CACurrentMediaTime())
+            // A refusal reads as a miss so the brain can try something else,
+            // rather than reporting a promise that was never made.
+            return (message, message.hasPrefix("Watching"))
+        case .listWatches:
+            return (shared.watches.listing(), true)
+        case .stopWatching(let name):
+            return (shared.watches.stop(matching: name), true)
+
+        case .listClips:
+            return (shared.clipboard.listing(), true)
+        case .recallClip(let query):
+            return shared.clipboard.recall(query)
+
+        case .readFile(let path):
+            return FileReader.toolResult(path: path)
+
+        case .mcpCall(let server, let tool, let arguments, _):
+            let decoded = (try? JSONSerialization.jsonObject(with: Data(arguments.utf8)))
+                as? [String: Any] ?? [:]
+            return shared.mcp.callTool(server: server, tool: tool, arguments: decoded)
         case .volume(let op):
             switch op {
             case .up: runAppleScript("set volume output volume (min(100, (output volume of (get volume settings)) + 10))")
@@ -100,7 +161,7 @@ enum AssistantExecutor {
         }
     }
 
-    private static func runningApp(named name: String) -> NSRunningApplication? {
+    static func runningApp(named name: String) -> NSRunningApplication? {
         let target = name.lowercased()
         return NSWorkspace.shared.runningApplications.first {
             $0.activationPolicy == .regular

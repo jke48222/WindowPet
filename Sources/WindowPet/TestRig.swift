@@ -580,7 +580,134 @@ final class TestRig {
             self.check("summon shortcut is valid", binding.isValid)
             self.check("shortcut has a readable name", !binding.displayName.isEmpty)
         })
+
+        // The awareness verbs, against the real window server. The unit tests
+        // cover the policy; these prove the bridge to AppKit is wired.
+        step(action: {
+            let snapshots = WindowInventory.snapshots()
+            // The rig's own windows are up by now, so this is never empty, and
+            // it must never contain our own overlay.
+            self.check("sees the real windows", !snapshots.isEmpty)
+            self.check("never lists its own overlay",
+                       !snapshots.contains { $0.app == "WindowPet" })
+            // The rig's own props are ordinary windows, so they must show up:
+            // an inventory that quietly saw nothing would pass the check above
+            // for the wrong reason.
+            self.check("sees the rig's own prop windows",
+                       snapshots.contains { $0.frame.width >= 120 })
+            self.check("every window has a real app name",
+                       snapshots.allSatisfy { !$0.app.isEmpty })
+            let report = WindowInventory.report()
+            self.check("window report is a readable sentence",
+                       report.contains("window") && !report.contains("Optional"))
+        })
+
+        step(action: {
+            // A layout captured from the screen as it stands must round-trip
+            // through disk unchanged.
+            let captured = WindowArranger.capture()
+            self.check("captured a layout from the real screen", !captured.isEmpty)
+            let existing = LayoutStore.load()
+            LayoutStore.store(WindowLayout(name: "rig probe layout", placements: captured))
+            let reloaded = LayoutStore.named("rig probe layout")
+            self.check("layout persists to disk", reloaded?.placements == captured)
+            self.check("layout found by partial name", LayoutStore.named("rig probe") != nil)
+            LayoutStore.save(existing)  // leave the user's layouts untouched
+            self.check("rig restored real layouts", LayoutStore.load().count == existing.count)
+        })
+
+        step(action: {
+            // The clipboard history records, filters and recalls, using the
+            // real pasteboard. Whatever was on it is put back afterwards.
+            let clipboard = AssistantExecutor.shared.clipboard
+            let restore = NSPasteboard.general.string(forType: .string)
+            clipboard.clear()
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString("rig probe clip about tin robots", forType: .string)
+            self.pasteboardSettled = false
+            // The poller runs twice a second; give it a beat to notice.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { self.pasteboardSettled = true }
+            self.clipboardRestore = restore
+        })
+        step("clipboard history recorded a real copy", timeout: 4,
+             until: { self.pasteboardSettled
+                 && AssistantExecutor.shared.clipboard.clips.contains {
+                     $0.contains("rig probe clip") } })
+
+        step(action: {
+            let clipboard = AssistantExecutor.shared.clipboard
+            // A key copied out of a password manager must never be kept.
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString("sk-ant-api03-rigprobenotasecretreally", forType: .string)
+            self.pasteboardSettled = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { self.pasteboardSettled = true }
+            _ = clipboard
+        })
+        step("secret-shaped clip was never stored", timeout: 4,
+             until: { self.pasteboardSettled
+                 && !AssistantExecutor.shared.clipboard.clips.contains { $0.hasPrefix("sk-ant") } })
+
+        step(action: {
+            let clipboard = AssistantExecutor.shared.clipboard
+            let recalled = clipboard.recall("tin robots")
+            self.check("recalled a clip back onto the clipboard", recalled.ok)
+            self.check("the clipboard actually holds it",
+                       NSPasteboard.general.string(forType: .string)?.contains("tin robots") == true)
+            clipboard.clear()
+            NSPasteboard.general.clearContents()
+            if let restore = self.clipboardRestore {
+                NSPasteboard.general.setString(restore, forType: .string)
+            }
+            self.check("rig left the clipboard as it found it",
+                       NSPasteboard.general.string(forType: .string) == self.clipboardRestore)
+        })
+
+        step(action: {
+            // A watch on a running app: set, listed, then cancelled. Firing is
+            // covered by the WatchPolicy unit tests; this proves the registry
+            // and the app lookup work against real processes.
+            let watches = AssistantExecutor.shared.watches
+            watches.clear()
+            let started = watches.watch(app: "Finder", reason: "the rig",
+                                        now: CACurrentMediaTime())
+            self.check("watch started on a running app", started.hasPrefix("Watching"))
+            self.check("watch appears in the listing", watches.listing().contains("Finder"))
+            let missing = watches.watch(app: "An App That Is Not Running",
+                                        reason: "", now: CACurrentMediaTime())
+            self.check("watching something absent is refused",
+                       !missing.hasPrefix("Watching"))
+            self.check("stopping a watch reports it",
+                       watches.stop(matching: "Finder").contains("Stopped"))
+            self.check("nothing left watching", watches.active.isEmpty)
+        })
+
+        step(action: {
+            // Reading a real file off disk, and refusing one that is not there.
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rig-probe-\(UUID().uuidString).md")
+            try? Data("# Rig probe\n\nA line about tin robots.".utf8).write(to: url)
+            switch FileReader.read(path: url.path) {
+            case .success(let reading):
+                self.check("read a text file off disk",
+                           reading.text?.contains("tin robots") == true)
+                self.check("named the file it read", reading.name == url.lastPathComponent)
+            case .failure:
+                self.check("read a text file off disk", false)
+                self.check("named the file it read", false)
+            }
+            try? FileManager.default.removeItem(at: url)
+            switch FileReader.read(path: url.path) {
+            case .success: self.check("a missing file is refused, not invented", false)
+            case .failure(let refusal):
+                self.check("a missing file is refused, not invented",
+                           refusal.message.contains("no file"))
+            }
+        })
     }
+
+    /// Scratch state for the clipboard steps, which have to wait out a poll.
+    private var pasteboardSettled = false
+    private var clipboardRestore: String?
 
     private func finish() {
         if failures.isEmpty {
