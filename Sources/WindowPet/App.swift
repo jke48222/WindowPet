@@ -96,6 +96,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         engine = PetEngine(stage: stage, verbose: verbose, sprites: sprites)
 
+        // Tool servers come up before the mode switch, not with the panel:
+        // they are part of what the agent can do, so a headless --ask run and
+        // the rig get the same tool list the running pet does.
+        AssistantExecutor.shared.mcp.startAll()
+        ClaudeAgent.mcpTools = AssistantExecutor.shared.mcp.toolDefinitions
+
         switch mode {
         case .pet:
             installStatusItem()
@@ -251,7 +257,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         stage.onDoubleClick = { [weak bar] in bar?.toggle() }
+        // Dropping a file on him is the most direct thing you can ask a
+        // creature standing on your screen to do.
+        stage.onFilesDropped = { [weak bar] urls in bar?.submitDroppedFiles(urls) }
         commandBar = bar
+
+        // Long-lived services. The watch registry keeps ticking between
+        // turns, which is the point of it, and speaks through the panel when
+        // something it promised to notice happens.
+        AssistantExecutor.shared.watches.onFire = { [weak self] message in
+            self?.commandBar?.announce(message)
+        }
+        AssistantExecutor.shared.clipboard.start()
 
         // A3: hold ⌥Space to talk; the live transcript streams into the
         // chat panel (dimmed until final).
@@ -377,6 +394,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         usageItem = usage
         menu.addItem(NSMenuItem(title: "Daily Spend Limit…", action: #selector(setSpendLimit),
                                 keyEquivalent: ""))
+        let abilities = NSMenu()
+        let clipboardItem = NSMenuItem(title: "Remember What I Copy",
+                                       action: #selector(toggleClipboardHistory), keyEquivalent: "")
+        clipboardItem.state = AssistantExecutor.shared.clipboard.isEnabled ? .on : .off
+        abilities.addItem(clipboardItem)
+        clipboardHistoryItem = clipboardItem
+        abilities.addItem(NSMenuItem(title: "Forget Copied Clips",
+                                     action: #selector(clearClipboardHistory), keyEquivalent: ""))
+        abilities.addItem(.separator())
+        let mcpStatus = NSMenuItem(title: mcpMenuTitle(), action: nil, keyEquivalent: "")
+        mcpStatus.isEnabled = false
+        abilities.addItem(mcpStatus)
+        mcpItem = mcpStatus
+        abilities.addItem(NSMenuItem(title: "Edit Tool Servers…", action: #selector(editMCPConfig),
+                                     keyEquivalent: ""))
+        abilities.addItem(NSMenuItem(title: "Reconnect Tool Servers",
+                                     action: #selector(reloadMCP), keyEquivalent: ""))
+        let abilitiesItem = NSMenuItem(title: "Abilities", action: nil, keyEquivalent: "")
+        abilitiesItem.submenu = abilities
+        menu.addItem(abilitiesItem)
         let character = NSMenuItem(title: "Character: \(characterName)", action: nil, keyEquivalent: "")
         character.isEnabled = false
         menu.addItem(character)
@@ -593,6 +630,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             elevenLabsItem?.title = elevenLabsMenuTitle()
         }
+    }
+
+    private var clipboardHistoryItem: NSMenuItem?
+    private var mcpItem: NSMenuItem?
+
+    private func mcpMenuTitle() -> String {
+        let host = AssistantExecutor.shared.mcp
+        let names = host.connectedNames
+        if names.isEmpty {
+            return FileManager.default.fileExists(atPath: MCPHost.configURL.path)
+                ? "Tool servers: none connected"
+                : "Tool servers: none configured"
+        }
+        let count = ClaudeAgent.mcpTools.count
+        return "Tool servers: \(names.joined(separator: ", ")) (\(count) "
+            + "\(count == 1 ? "tool" : "tools"))"
+    }
+
+    @objc private func toggleClipboardHistory() {
+        let clipboard = AssistantExecutor.shared.clipboard
+        clipboard.isEnabled.toggle()
+        clipboardHistoryItem?.state = clipboard.isEnabled ? .on : .off
+        commandBar?.systemNote(clipboard.isEnabled
+            ? "I will remember what you copy while I am running. Nothing is written to disk, and anything shaped like a password or a key is skipped."
+            : "Stopped remembering what you copy, and forgot what I had.")
+    }
+
+    @objc private func clearClipboardHistory() {
+        AssistantExecutor.shared.clipboard.clear()
+        commandBar?.systemNote("Forgot the copied clips.")
+    }
+
+    /// Opens mcp.json in the user's editor, writing a commented example first
+    /// if there is nothing there yet. Editing a config by hand is the right
+    /// interface for this: it is a list of commands to run.
+    @objc private func editMCPConfig() {
+        let url = MCPHost.configURL
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? Data(MCPConfig.example.utf8).write(to: url, options: .atomic)
+        }
+        NSWorkspace.shared.open(url)
+        commandBar?.systemNote("Opened mcp.json. Add a server, save, then choose Reconnect Tool Servers.")
+    }
+
+    @objc private func reloadMCP() {
+        let host = AssistantExecutor.shared.mcp
+        host.startAll()
+        ClaudeAgent.mcpTools = host.toolDefinitions
+        mcpItem?.title = mcpMenuTitle()
+        let report = host.startupReport
+        commandBar?.systemNote(report.isEmpty
+            ? "No tool servers are configured. Choose Edit Tool Servers to add one."
+            : report.joined(separator: "; "))
     }
 
     /// The ceiling on what Rusty may spend per day. Enforced before every

@@ -5,7 +5,7 @@ final class ClaudeAgentTests: XCTestCase {
 
     // MARK: tool definitions
 
-    func testToolDefinitionsCoverEveryActionableVerb() throws {
+    @MainActor func testToolDefinitionsCoverEveryActionableVerb() throws {
         let tools = ClaudeAgent.toolDefinitions
         let names = tools.compactMap { $0["name"] as? String }
         // "none" is conversation, not a tool; everything else is callable.
@@ -27,12 +27,13 @@ final class ClaudeAgentTests: XCTestCase {
         }
     }
 
-    func testEveryToolNameMapsBackToAGatedAction() {
+    @MainActor func testEveryToolNameMapsBackToAGatedAction() {
         // The loop's whole safety story: a tool call becomes the same
         // AssistantAction a typed command would, so gating still applies.
         // Arguments are per-verb because the mappers validate them (open_url
         // only accepts a real https URL, for instance).
-        let sample = ["open_url": "https://example.com", "press_keys": "cmd+t"]
+        let sample = ["open_url": "https://example.com", "press_keys": "cmd+t",
+                      "place_windows": "Safari left"]
         for name in ClaudeAgent.toolDefinitions.compactMap({ $0["name"] as? String })
         where !ClaudeAgent.internalVerbs.contains(name)
             && !ClaudeAgent.serverToolNames.contains(name) {
@@ -51,7 +52,7 @@ final class ClaudeAgentTests: XCTestCase {
 
     // MARK: server-side web tools
 
-    func testWebToolsAreOffered() throws {
+    @MainActor func testWebToolsAreOffered() throws {
         let tools = ClaudeAgent.toolDefinitions
         let byName = Dictionary(uniqueKeysWithValues: tools.compactMap { tool -> (String, [String: Any])? in
             guard let name = tool["name"] as? String else { return nil }
@@ -85,7 +86,8 @@ final class ClaudeAgentTests: XCTestCase {
         guard case .turn(let turn) = ClaudeAgent.parseTurn(payload) else {
             return XCTFail("expected a turn")
         }
-        XCTAssertEqual(turn.calls, [.init(id: "toolu_1", name: "open", argument: "Safari")])
+        XCTAssertEqual(turn.calls, [.init(id: "toolu_1", name: "open", argument: "Safari",
+                                          rawArguments: #"{"argument":"Safari"}"#)])
         // All three blocks still echo back for replay.
         XCTAssertEqual(turn.rawContent.count, 3)
     }
@@ -106,7 +108,7 @@ final class ClaudeAgentTests: XCTestCase {
 
     // MARK: request
 
-    func testAgentRequestShape() throws {
+    @MainActor func testAgentRequestShape() throws {
         let messages = [ClaudeAgent.userMessage("open safari")]
         let spec = try XCTUnwrap(ClaudeAgent.agentRequest(messages: messages, apiKey: "sk-ant-a"))
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: spec.body) as? [String: Any])
@@ -149,8 +151,10 @@ final class ClaudeAgentTests: XCTestCase {
         XCTAssertEqual(turn.stopReason, "tool_use")
         XCTAssertEqual(turn.text, "On it.")
         XCTAssertEqual(turn.calls, [
-            .init(id: "toolu_1", name: "open", argument: "Safari"),
-            .init(id: "toolu_2", name: "search", argument: "tin toys"),
+            .init(id: "toolu_1", name: "open", argument: "Safari",
+                  rawArguments: #"{"argument":"Safari"}"#),
+            .init(id: "toolu_2", name: "search", argument: "tin toys",
+                  rawArguments: #"{"argument":"tin toys"}"#),
         ])
         // Raw content is echoed verbatim; thinking blocks carry signatures.
         XCTAssertEqual(turn.rawContent.count, 4)

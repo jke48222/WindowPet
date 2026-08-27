@@ -125,6 +125,32 @@ the screen when you ask, and remember what matters between launches.
 **Every tier only ever proposes.** Each returns a verb, an argument and a reply. Execution always
 goes through the same gate, and that is the part worth reading.
 
+### What he can actually do
+
+Beyond opening apps and pressing keys, the abilities that exist because he lives on your windows
+rather than in a chat box:
+
+- **He can see the windows.** `windows` reports every open window: which apps, how many, what size,
+  and where on screen, in words rather than coordinates. It reuses the same zero-permission Tier 1
+  poll the creature walks on, and it keeps the invariant below: app names come from the process id,
+  never from `kCGWindowOwnerName`, and no window title is read anywhere in it.
+- **He can arrange them.** `place_windows` takes "Safari left, Terminal bottom right" and moves them
+  through the Accessibility trust he already holds, on whichever display each window is already on.
+  `save_layout` and `layout` remember and restore an arrangement by name.
+- **He can watch and tell you.** `watch Xcode until the build finishes` returns immediately and says
+  something later, when that app's windows have stopped changing or it quits. This is the one thing
+  a creature standing on your windows can do that a chat window structurally cannot: he is already
+  counting how often each app changes, so a watch costs one comparison per second.
+- **He remembers what you copy.** Held in memory only, never written to disk, and filtered twice:
+  once by the system, because password managers mark their pasteboard entries concealed, and once by
+  [`ClipPolicy`](Sources/WindowPetCore/ClipPolicy.swift), which drops anything shaped like a key or
+  a token.
+- **You can drop a file on him.** Text and PDFs are read into the conversation; anything else is
+  named honestly rather than pretended at.
+- **He speaks MCP.** Servers declared in `mcp.json` are spawned at launch, and their tools join the
+  same schema and the same confirmation gate as the built-in verbs. Abilities stop being a list
+  somebody has to recompile.
+
 ## The safety gate
 
 [`Assistant.swift`](Sources/WindowPetCore/Assistant.swift) defines the action verbs and marks which
@@ -133,6 +159,12 @@ ones require confirmation:
 - `quitApp` always confirms.
 - `runAppleScript` confirms when the script matches the dangerous-script check.
 - `runAdminShell` always confirms, without exception.
+- `readFile` always confirms. A model that can be talked into reading an arbitrary path is a model
+  that can be talked into reading a key file, so the tool form stops for a human every time. A file
+  **dropped onto Rusty** does not use this tool at all: the drop is the consent, and the contents go
+  straight into the conversation with the panel showing what was read.
+- An **MCP tool confirms unless its server is marked `"trust": "always"`** in `mcp.json`. Trust is a
+  line a person writes in a config file, never a decision the model can take for itself.
 
 Three properties make this hold up:
 
@@ -149,7 +181,8 @@ Three properties make this hold up:
    password prompt.
 3. **It is tested.** 24 tests on the routing layer and 30 on the agent loop, including replays of
    whole multi-turn conversations from canned API responses, plus end to end checks in the rig
-   asserting that quit, admin and destructive scripts are gated while a harmless script is not.
+   asserting that quit, admin and destructive scripts are gated while a harmless script is not, and
+   that an untrusted MCP tool and a `read_file` on an arbitrary path both stop for a human.
 4. **There is a spending ceiling.** [`BudgetPolicy.swift`](Sources/WindowPetCore/BudgetPolicy.swift)
    is checked before every model call, including each iteration of the loop, so a plan that keeps
    deciding on one more step stops at the ceiling rather than past it. It defaults to $5 a day and
@@ -181,12 +214,12 @@ Every number below has a file or a command behind it.
 
 | Result | Value | How it was measured |
 | --- | --- | --- |
-| Unit tests | **195 passing, 0 failures**, across 18 files | `swift test`, run 2026-08-27 |
-| End to end rig | **93 of 93**, seven parts | `--testrig`, run 2026-08-27, caveat below |
+| Unit tests | **294 passing, 0 failures**, across 21 files | `swift test`, run 2026-08-27 |
+| End to end rig | **115 of 115**, seven parts | `--testrig`, run 2026-08-27, caveat below |
 | Idle CPU | **0.24%** of one core, 47.7 MB | [`ENERGY.md`](ENERGY.md), M5 Pro, release build |
 | Perched CPU | **0.42%**, 47.6 MB | Same run |
 | Active CPU | **1.04%**, 48.5 MB | Same run |
-| Source size | 13,962 lines, 79 files | Sources 10,271, Tests 2,136, Tools 1,515, Package.swift 40 |
+| Source size | 16,919 lines, 96 files | Sources 12,368, Tests 2,893, Tools 1,618, Package.swift 40 |
 | Dependencies | zero | `Package.swift` |
 
 ### The energy numbers, and how they were taken
@@ -255,11 +288,13 @@ observer sees genuine cross-process events, then asserts against the running cre
 
 The total is a **runtime tally**, not something a static count of the source can settle: the rig
 increments once per named step that resolves plus each explicit check. Runs on 2026-08-27 gave
-93 of 93 repeatedly, with a 90, an 87 and an 86 recorded while the machine was loaded (a background
+115 of 115 repeatedly, with a 90, an 87 and an 86 recorded while the machine was loaded (a background
 sync process pinning a core, then a load average above 5 with the window server at 18%). The failing
 checks in all three were window choreography timing out, and the sets differed run to run rather
-than repeating, which is the signature of load rather than a regression. Three consecutive 93 of 93
-followed once the machine was quiet. **Treat 93 of 93 as the expected result and planner travel as the part
+than repeating, which is the signature of load rather than a regression: consecutive full passes
+followed once the machine was quiet. The same caveat applies to the energy benchmark, which reported
+a hard-budget failure under load and passed with the identical build ninety seconds later. **Quit
+everything and check `uptime` before believing a regression in either.** **Treat 93 of 93 as the expected result and planner travel as the part
 that is timing sensitive under load.** The rig is built to wait rather than assert against wall
 clock choreography, but that phase has the least slack.
 
@@ -283,14 +318,14 @@ Grant Accessibility from that same menu when you want event-driven tracking. The
 for it on its own, and everything works without it.
 
 ```bash
-swift test                          # 195 unit tests, headless, opens no windows
+swift test                          # 294 unit tests, headless, opens no windows
 swift run WindowPet -- --diag 6     # verbose tracking log for 6 seconds, then exits
 swift run WindowPet -- --testrig    # end to end check, opens its own windows, exits 0 or 1
 swift run WindowPet -- --bench 15   # energy benchmark, asserts budgets, exits 0 or 1
 swift run WindowPet -- --ask "..."  # headless: run one prompt through the agent and print
 ```
 
-A successful `swift test` ends with `Executed 195 tests, with 0 failures`. A successful rig run ends
+A successful `swift test` ends with `Executed 294 tests, with 0 failures`. A successful rig run ends
 with `RIG PASS 93/93` and exit code 0.
 
 Build a distributable app:
@@ -331,6 +366,12 @@ Sources/
 │   ├── PetMemory.swift         Durable facts and a conversation tail across launches
 │   ├── ShimejiActions.swift    Parsing third party sprite pack definitions
 │   ├── BudgetPolicy.swift      The daily spend ceiling, checked before every call
+│   ├── WindowReport.swift      Describing the open windows in words, no titles
+│   ├── WindowLayout.swift      Slots, placements, and the arrangement grammar
+│   ├── WatchPolicy.swift       When a watched app counts as finished
+│   ├── ClipPolicy.swift        What the clipboard history keeps, and never keeps
+│   ├── FilePolicy.swift        What Rusty will read off disk, and how much
+│   ├── MCPProtocol.swift       Model Context Protocol client framing
 │   └── SkinDefinition.swift    The user-authored JSON skin schema
 ├── WindowPet/              The AppKit application
 │   ├── Tier1.swift             Window list polling. Zero permissions
@@ -342,6 +383,12 @@ Sources/
 │   ├── PetEngine+Mouse.swift     The click-through hole, grabbing and flinging
 │   ├── PetEngine+Debug.swift     The read-only surface the rig and --diag drive
 │   ├── Screens.swift           Which display a panel or a snapped window belongs on
+│   ├── WindowInventory.swift   The window list and the arranger that moves them
+│   ├── WatchRegistry.swift     Live watches, ticking between turns
+│   ├── ClipboardHistory.swift  In-memory clipboard recall, never written to disk
+│   ├── LayoutStore.swift       Named arrangements on disk
+│   ├── FileReader.swift        Text and PDF reading for drops and read_file
+│   ├── MCPHost.swift           Spawning MCP servers and speaking JSON-RPC to them
 │   ├── OverlayStage.swift      Presentation, and the click-through hole
 │   ├── OverlayPanel.swift      The transparent non-activating all-Spaces panel
 │   ├── SpriteSet.swift         Animation frames and their per-frame alpha masks
@@ -360,7 +407,7 @@ Sources/
 │   └── App.swift               Delegate, mode parsing, status item
 └── PetGen/                 One-shot sprite generator
 
-Tests/WindowPetCoreTests/   195 tests, all against the pure core
+Tests/WindowPetCoreTests/   294 tests, all against the pure core
 Tools/                      Character design sheets, app and DMG packaging, energy benchmark
 ENERGY.md                   Generated by Tools/energy-bench.sh
 ```

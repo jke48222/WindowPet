@@ -410,6 +410,54 @@ final class CommandBar: NSObject, NSTextFieldDelegate {
         run(text, fromVoice: true)
     }
 
+    /// A file dropped onto Rusty. The drop is the consent, so the contents go
+    /// straight into the turn rather than through the gated read_file tool,
+    /// and the panel shows what was dropped so it is never a silent read.
+    func submitDroppedFiles(_ urls: [URL]) {
+        if collapsed { setCollapsed(false) }
+        present()
+        var parts: [String] = []
+        var labels: [String] = []
+        // More than a few at once is a folder's worth; the first three carry
+        // the intent and the rest are named rather than read.
+        for url in urls.prefix(3) {
+            switch FileReader.read(path: url.path) {
+            case .failure(let refusal):
+                labels.append(url.lastPathComponent)
+                parts.append("\(url.lastPathComponent): \(refusal.message)")
+            case .success(let reading):
+                labels.append(reading.name)
+                let header = FilePolicy.dropPrompt(name: reading.name, kind: reading.kind,
+                                                   byteCount: reading.byteCount)
+                if let text = reading.text {
+                    parts.append("\(header)\n\n\(text)")
+                } else {
+                    parts.append(header)
+                }
+            }
+        }
+        if urls.count > 3 {
+            let rest = urls.dropFirst(3).map(\.lastPathComponent).joined(separator: ", ")
+            parts.append("I also dropped these, which you have not seen the contents of: \(rest)")
+        }
+        // The row the user sees names the files; the turn carries the text.
+        messages.append(Message(kind: .user, text: "Dropped " + labels.joined(separator: ", ")))
+        rebuildRows()
+        run(parts.joined(separator: "\n\n") + "\n\nWhat do you make of it?", fromVoice: false)
+    }
+
+    /// Something Rusty says on his own, without being asked: a watch firing.
+    /// Spoken as well as shown, because the whole point of a watch is that the
+    /// user is looking at something else.
+    func announce(_ text: String) {
+        present()
+        messages.append(Message(kind: .rusty, text: text))
+        history.append((role: "assistant", text: text))
+        rebuildRows()
+        onOutcome?(.reply(text), false)
+        scheduleHide(after: 10)
+    }
+
     /// Out-of-band notes (voice errors etc.) that should reach the user.
     func systemNote(_ text: String) {
         present()

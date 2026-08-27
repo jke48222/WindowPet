@@ -35,7 +35,8 @@ final class StreamAccumulatorTests: XCTestCase {
             #"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
         ]))
         guard case .turn(let turn) = acc.finish() else { return XCTFail("expected turn") }
-        XCTAssertEqual(turn.calls, [.init(id: "toolu_9", name: "open", argument: "Safari")])
+        XCTAssertEqual(turn.calls, [.init(id: "toolu_9", name: "open", argument: "Safari",
+                                          rawArguments: #"{"argument":"Safari"}"#)])
         XCTAssertEqual(turn.stopReason, "tool_use")
         // The echoed block must carry the parsed input, not the raw fragments.
         let toolBlock = turn.rawContent.first { $0["type"] as? String == "tool_use" }
@@ -138,7 +139,8 @@ final class StreamAccumulatorTests: XCTestCase {
 
         guard case .turn(let turn) = acc.finish() else { return XCTFail("expected turn") }
         XCTAssertEqual(turn.calls,
-                       [.init(id: "toolu_01PdqtYqg9G7Rd5NgPaj3uuU", name: "open", argument: "Safari")])
+                       [.init(id: "toolu_01PdqtYqg9G7Rd5NgPaj3uuU", name: "open", argument: "Safari",
+                              rawArguments: #"{"argument":"Safari"}"#)])
         XCTAssertEqual(turn.stopReason, "tool_use")
 
         // Usage is summed from both ends of the stream.

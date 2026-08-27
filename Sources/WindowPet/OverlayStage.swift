@@ -59,6 +59,10 @@ final class OverlayStage {
     var onDrag: ((CGPoint) -> Void)?
     var onRelease: ((CGPoint) -> Void)?
     var onDoubleClick: (() -> Void)?
+    /// Files dropped onto the sprite. Dropping something on Rusty is a
+    /// physical act of consent, so these are read without a confirmation the
+    /// way the gated read_file tool needs one.
+    var onFilesDropped: (([URL]) -> Void)?
 
     init() {
         sprite.bounds = CGRect(origin: .zero, size: spriteSize)
@@ -360,6 +364,7 @@ final class PetView: NSView {
         self.stage = stage
         super.init(frame: frame)
         wantsLayer = true
+        registerForDraggedTypes([.fileURL])
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -386,4 +391,35 @@ final class PetView: NSView {
     }
     override func mouseDragged(with event: NSEvent) { stage?.onDrag?(global(event)) }
     override func mouseUp(with event: NSEvent) { stage?.onRelease?(global(event)) }
+
+    // MARK: - Dropping a file on him
+
+    /// The click-through hole normally makes this view invisible to the mouse
+    /// everywhere except the sprite, and drags land the same way: a file is
+    /// only accepted over Rusty himself, so dropping on the desktop behind him
+    /// still reaches the desktop.
+    private func isOverPet(_ sender: NSDraggingInfo) -> Bool {
+        guard let stage, let window else { return false }
+        let point = sender.draggingLocation
+        return stage.hit(CGPoint(x: window.frame.origin.x + point.x,
+                                 y: window.frame.origin.y + point.y))
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        isOverPet(sender) ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        isOverPet(sender) ? .copy : []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard isOverPet(sender),
+              let urls = sender.draggingPasteboard.readObjects(
+                forClasses: [NSURL.self],
+                options: [.urlReadingFileURLsOnly: true]) as? [URL],
+              !urls.isEmpty else { return false }
+        stage?.onFilesDropped?(urls)
+        return true
+    }
 }

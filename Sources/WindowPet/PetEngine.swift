@@ -292,6 +292,10 @@ final class PetEngine: NSObject {
     /// structural (created/focused/minimized).
     func tier2Activity(pid: pid_t, note: String) {
         debugTier2WakeCount += 1
+        // A watch on this app rides the stream that is already flowing, so
+        // "tell me when the build finishes" costs nothing extra. Frequency
+        // only: the note's name, never a window title.
+        AssistantExecutor.shared.watches.noteActivity(pid: pid, now: CACurrentMediaTime())
         guard stateName != "suspended", !isGrabbed else { return }
         let now = CACurrentMediaTime()
         if case .standing(let ref, let offsetX) = state,
