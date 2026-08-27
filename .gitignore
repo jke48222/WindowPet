@@ -4,3 +4,5 @@
 DerivedData/
 .DS_Store
 ._*
+.env
+build/

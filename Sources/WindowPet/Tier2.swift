@@ -36,6 +36,7 @@ final class Tier2Observer {
         kAXFocusedWindowChangedNotification,
         kAXWindowMiniaturizedNotification,
         kAXWindowDeminiaturizedNotification,
+        kAXTitleChangedNotification, // frequency only — we never read the title
     ]
 
     init?(pid: pid_t) {
@@ -116,6 +117,7 @@ final class Tier2Manager {
     private var observers: [pid_t: Tier2Observer] = [:]
     private(set) var states: [pid_t: AppState] = [:]
     private var lastWakeAt: [pid_t: TimeInterval] = [:]
+    private var titleRates: [pid_t: DecayingRate] = [:]
     private var probeTimer: DispatchSourceTimer?
     private let maxObservers = 6
 
@@ -169,6 +171,7 @@ final class Tier2Manager {
         observers.removeValue(forKey: pid)?.invalidate()
         states.removeValue(forKey: pid)
         lastWakeAt.removeValue(forKey: pid)
+        titleRates.removeValue(forKey: pid)
     }
 
     func isAttached(_ pid: pid_t) -> Bool { observers[pid] != nil }
@@ -182,10 +185,34 @@ final class Tier2Manager {
     private func handleEvent(pid: pid_t, note: String) {
         states[pid]?.eventsSeen += 1
         let now = CACurrentMediaTime()
+        if note == kAXTitleChangedNotification {
+            titleRates[pid, default: DecayingRate()].hit(at: now)
+        }
         if now - (lastWakeAt[pid] ?? 0) > 0.03 {
             lastWakeAt[pid] = now
             onActivity?(pid, note)
         }
+    }
+
+    /// Title-change frequency for an observed app — the "is something
+    /// happening in there" signal (builds, progress titles, playback).
+    func titleRate(pid: pid_t, at now: TimeInterval) -> Double {
+        titleRates[pid]?.rate(at: now) ?? 0
+    }
+
+    /// Most title-active observed app above the agitation threshold, if any.
+    func hottestTitleApp(at now: TimeInterval) -> (pid: pid_t, rate: Double)? {
+        let best = titleRates
+            .map { (pid: $0.key, rate: $0.value.rate(at: now)) }
+            .max { $0.rate < $1.rate }
+        guard let best, ReactionPolicy.isAgitated(titleRate: best.rate) else { return nil }
+        return best
+    }
+
+    /// Test hook: inject title activity as if events had arrived.
+    func debugBumpTitleRate(pid: pid_t, hits: Int) {
+        let now = CACurrentMediaTime()
+        for _ in 0..<hits { titleRates[pid, default: DecayingRate()].hit(at: now) }
     }
 
     private func evictOldest(protecting protected: pid_t?) {

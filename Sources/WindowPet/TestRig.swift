@@ -1,17 +1,14 @@
 import AppKit
 import WindowPetCore
 
-/// Autonomous end-to-end verification, zero permissions. Two parts:
+/// Autonomous end-to-end verification, zero permissions, structured as a
+/// SEQUENTIAL STEP RUNNER: every step performs an action and then polls a
+/// condition (0.1 s) until it holds or times out. Nothing asserts against
+/// wall-clock choreography, so load spikes on a live machine turn into waits
+/// instead of flakes.
 ///
-/// Part A (always runs): window-independent physics on real screen terrain —
-/// floor landing, sprite/anchor coherence, wall climbing with rotation,
-/// grab/drag/throw, the alpha-mask hole, clock quiescence.
-///
-/// Part B (canary-gated): window terrain — spawn/close/fall/walk/leap/
-/// occlusion/riding, using titled windows in THIS process. Some environments
-/// (fullscreen video, Focus contexts) suppress background titled windows;
-/// the canary detects that and Part B is skipped loudly instead of failing
-/// misleadingly.
+/// Parts: B window terrain · A floor/touch/climb · C Tier-2 AX events ·
+/// D behavior brain · E reactions.
 final class TestRig {
 
     private let engine: PetEngine
@@ -20,32 +17,33 @@ final class TestRig {
     private var winB: NSWindow!
     private var winD: NSWindow!
     private var winE: NSWindow!
-    private var moveTimer: Timer?
+    private var winS: NSWindow!
+    private var winG: NSWindow!
+    private var winI: NSWindow!
+    private var winH: NSWindow!
+    private var moveHelper: Process?
+    private var spamHelper: Process?
+    private var moveDone = false
+    private var lastStatus = ""
 
+    private var xMark: CGFloat = 0
+    private var climbY0: CGFloat = 0
+    private var axEventsAtProbe = 0
+
+    private var shimejiResult: (set: SpriteSet, name: String)?
     private var checks = 0
     private var failures: [String] = []
-    private var skippedWindowPhases = false
-    private var skippedAXPhases = false
-    private var helper: Process?
-    private var axEventsAtProbe = 0
-    private var xBeforeClose: CGFloat = 0
-    private var xBeforeWalk: CGFloat = 0
-    private var anchorBeforeRide: CGFloat = 0
-    private var climbY0: CGFloat = 0
+
+    private var steps: [(name: String?, timeout: TimeInterval,
+                         action: () -> Void, until: (() -> Bool)?)] = []
 
     init(engine: PetEngine, stage: OverlayStage) {
         self.engine = engine
         self.stage = stage
     }
 
-    /// Borderless: environments that suppress background TITLED windows
-    /// (fullscreen video, Focus contexts) still map borderless layer-0
-    /// windows, so the rig's terrain works everywhere. Physics only reads
-    /// frames — a title bar adds nothing. Tinted so a watching human can see
-    /// the test happening.
     private func makeWindow(_ rect: CGRect, title: String) -> NSWindow {
-        let w = NSWindow(contentRect: rect,
-                         styleMask: [.borderless],
+        let w = NSWindow(contentRect: rect, styleMask: [.borderless],
                          backing: .buffered, defer: false)
         w.title = title
         w.backgroundColor = NSColor.systemTeal.withAlphaComponent(0.35)
@@ -54,272 +52,51 @@ final class TestRig {
         return w
     }
 
-    func run() {
-        engine.autonomy = false
-        engine.allowOwnWindows = true
-        engine.debugForcePID = ProcessInfo.processInfo.processIdentifier
-        engine.world.restrictPID = ProcessInfo.processInfo.processIdentifier
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 40) {
-            print("RIG FAIL timeout — scenario did not complete")
-            exit(2)
-        }
-
-        let canary = makeWindow(CGRect(x: 60, y: 60, width: 220, height: 140), title: "Rig canary")
-        after(0.45) {
-            let mapped = Tier1.window(byID: CGWindowID(exactly: canary.windowNumber) ?? 0)?.isOnScreen ?? false
-            canary.close()
-            if mapped {
-                self.runWindowPhases() // Part B, then Part A
-            } else {
-                self.skippedWindowPhases = true
-                print("rig: NOTE — window server suppresses background titled windows; running floor phases only")
-                self.engine.start()
-                self.after(0.2) { self.runFloorPhases(at: 0.4) }
-            }
-        }
+    private func mapped(_ w: NSWindow?) -> Bool {
+        guard let w else { return false }
+        return Tier1.window(byID: CGWindowID(exactly: w.windowNumber) ?? 0)?.isOnScreen ?? false
     }
-
-    // MARK: - Part B: window terrain
-
-    private func runWindowPhases() {
-        winA = makeWindow(CGRect(x: 200, y: 150, width: 700, height: 300), title: "Rig A")
-        winB = makeWindow(CGRect(x: 350, y: 560, width: 500, height: 260), title: "Rig B")
-        NSApp.activate()
-
-        after(0.3) { self.engine.start() }
-
-        after(1.7) {
-            self.check("sprites loaded (\(self.engine.spriteFrameCount) frames)",
-                       self.engine.spriteFrameCount >= 15)
-            self.check("spawned onto B (state=\(self.engine.stateName))",
-                       self.engine.stateName == "standing" && self.engine.currentWindowID == self.id(of: self.winB))
-            self.checkAnchorOnTop(of: self.winB, "perched on B's title bar")
-            self.check("pet visible", self.stage.isPetVisible)
-            self.checkSpriteMatchesAnchor()
-        }
-        after(1.9) {
-            self.xBeforeClose = self.engine.anchor.x
-            self.winB.close()
-        }
-        after(2.08) {
-            self.check("falling after B closed (state=\(self.engine.stateName))",
-                       self.engine.stateName == "falling")
-        }
-        after(3.2) {
-            self.check("landed on A (state=\(self.engine.stateName))",
-                       self.engine.stateName == "standing" && self.engine.currentWindowID == self.id(of: self.winA))
-            self.checkAnchorOnTop(of: self.winA, "standing on A's title bar")
-            self.check("fell straight down",
-                       abs(self.engine.anchor.x - self.xBeforeClose) <= 8)
-        }
-        after(3.4) {
-            self.xBeforeWalk = self.engine.anchor.x
-            self.engine.debugWalk(dir: 1, duration: 1.0)
-        }
-        after(3.9) {
-            self.check("walking (state=\(self.engine.stateName))", self.engine.stateName == "walking")
-            self.check("moved right while walking", self.engine.anchor.x > self.xBeforeWalk + 15)
-            self.checkAnchorOnTop(of: self.winA, "stayed on the edge mid-walk")
-        }
-        after(4.7) {
-            let dx = self.engine.anchor.x - self.xBeforeWalk
-            self.check(String(format: "walk distance %.0fpt ≈ 55pt", dx), abs(dx - 55) <= 14)
-            self.check("standing after walk", self.engine.stateName == "standing")
-        }
-        after(4.9) {
-            self.winD = self.makeWindow(CGRect(x: 300, y: 640, width: 420, height: 240), title: "Rig D")
-        }
-        after(5.2) {
-            self.engine.debugLeap(toWindowID: self.id(of: self.winD))
-        }
-        after(5.35) {
-            self.check("leaping (state=\(self.engine.stateName))", self.engine.stateName == "leaping")
-        }
-        after(6.3) {
-            self.check("landed on D (state=\(self.engine.stateName))",
-                       self.engine.stateName == "standing" && self.engine.currentWindowID == self.id(of: self.winD))
-            self.checkAnchorOnTop(of: self.winD, "perched on D after leap")
-        }
-        after(6.5) {
-            self.winE = self.makeWindow(CGRect(x: 250, y: 700, width: 560, height: 240), title: "Rig E")
-        }
-        after(8.2) {
-            self.check("evicted from D after occlusion", self.engine.currentWindowID != self.id(of: self.winD))
-        }
-        after(9.0) {
-            self.check("fell back to A (state=\(self.engine.stateName))",
-                       self.engine.stateName == "standing" && self.engine.currentWindowID == self.id(of: self.winA))
-            self.checkAnchorOnTop(of: self.winA, "standing on A again")
-        }
-        after(9.2) {
-            self.anchorBeforeRide = self.engine.anchor.x
-            let start = self.winA.frame.origin
-            let t0 = Date()
-            self.moveTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
-                guard let self else { timer.invalidate(); return }
-                let p = min(1, Date().timeIntervalSince(t0) / 1.0)
-                self.winA.setFrameOrigin(CGPoint(x: start.x + 220 * p, y: start.y))
-                if p >= 1 { timer.invalidate() }
-            }
-        }
-        after(10.7) {
-            let dx = self.engine.anchor.x - self.anchorBeforeRide
-            self.check(String(format: "rode A during drag (Δx %.0fpt ≈ 220pt)", dx), abs(dx - 220) <= 3)
-            self.checkAnchorOnTop(of: self.winA, "still on A's title bar after ride")
-            self.checkSpriteMatchesAnchor()
-        }
-        after(11.2) {
-            self.winA.close()
-            self.winD.close()
-            self.winE.close()
-            self.runFloorPhases(at: 11.6)
-        }
-    }
-
-    // MARK: - Part A: floor, climbing, grabbing, the hole
-
-    private func runFloorPhases(at t0: TimeInterval) {
-        let base = t0
-
-        after(base) { self.engine.debugTeleportToFloor() }
-        after(base + 1.2) {
-            let floorY = NSScreen.screens.first?.visibleFrame.minY ?? 0
-            self.check("standing on the floor (state=\(self.engine.stateName))",
-                       self.engine.stateName == "standing" && self.engine.currentWindowID == nil)
-            self.check(String(format: "anchor on floor (y=%.0f, floor=%.0f)", self.engine.anchor.y, floorY),
-                       abs(self.engine.anchor.y - floorY) <= 1.5)
-            self.checkSpriteMatchesAnchor()
-        }
-
-        // The hole: over creature pixels vs gaps vs empty air.
-        after(base + 1.4) {
-            let c = self.stage.spriteGlobalRect
-            let bodyPoint = CGPoint(x: c.midX, y: c.midY + 8)          // upper body: opaque
-            let gapPoint = CGPoint(x: c.midX, y: c.minY + 3)           // between the feet: transparent
-            let farPoint = CGPoint(x: c.midX + 300, y: c.midY + 200)   // empty air
-            self.check("hole opens over creature pixels", self.engine.debugHole(at: bodyPoint))
-            self.check("panel accepts events while hole open", self.stage.holeIsOpen)
-            self.check("no hole between the feet (alpha gap)", !self.engine.debugHole(at: gapPoint))
-            self.check("no hole in empty air", !self.engine.debugHole(at: farPoint))
-            self.check("panel click-through when hole closed", !self.stage.holeIsOpen)
-        }
-
-        // Climbing: up the left wall, rotated, then leaps off and lands.
-        // 140 pt at 45 pt/s ≈ 3.1 s of climb, then ~1 s of leap-off + landing.
-        after(base + 1.7) {
-            self.climbY0 = self.engine.anchor.y
-            let floor = NSScreen.screens.first?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1512, height: 950)
-            self.engine.debugClimb(side: -1, targetY: floor.minY + 140)
-        }
-        after(base + 2.6) {
-            let floor = NSScreen.screens.first?.visibleFrame ?? .zero
-            self.check("climbing (state=\(self.engine.stateName))", self.engine.stateName == "climbing")
-            self.check(String(format: "on the left wall (x=%.0f)", self.engine.anchor.x),
-                       abs(self.engine.anchor.x - floor.minX) <= 1.5)
-            self.check("moved upward while climbing", self.engine.anchor.y > self.climbY0 + 25)
-            self.check(String(format: "sprite rotated for wall (%.0f°)", self.engine.currentRotationDegrees),
-                       self.engine.currentRotationDegrees == -90)
-        }
-        after(base + 7.4) {
-            self.check("back on the floor after wall leap (state=\(self.engine.stateName))",
-                       self.engine.stateName == "standing" && self.engine.currentWindowID == nil)
-            self.check("sprite upright again", self.engine.currentRotationDegrees == 0)
-        }
-
-        // Grab, drag, throw.
-        after(base + 7.6) {
-            let c = self.stage.spriteGlobalRect
-            self.engine.debugGrab(at: CGPoint(x: c.midX, y: c.midY))
-        }
-        after(base + 7.8) {
-            self.check("grabbed (state=\(self.engine.stateName))", self.engine.stateName == "grabbed")
-            self.check("link paused while held (event-driven)", !self.engine.displayLinkActive)
-            self.engine.debugDrag(to: CGPoint(x: 500, y: 500))
-            self.engine.debugDrag(to: CGPoint(x: 560, y: 540))
-        }
-        after(base + 8.0) {
-            self.check(String(format: "followed the drag (x=%.0f)", self.engine.anchor.x),
-                       abs(self.engine.anchor.x - 560) <= 1.5)
-            self.engine.debugRelease(velocity: CGPoint(x: 350, y: 450))
-        }
-        after(base + 8.15) {
-            self.check("thrown → ballistic (state=\(self.engine.stateName))",
-                       self.engine.stateName == "leaping" || self.engine.stateName == "falling")
-        }
-        after(base + 10.4) {
-            self.check("landed after throw (state=\(self.engine.stateName))",
-                       self.engine.stateName == "standing")
-            self.check("throw carried it right", self.engine.anchor.x > 600)
-        }
-
-        // Part C: Tier 2 — real cross-process AX events from a helper
-        // process wiggling a titled window. (Titled is fine here: AX trees
-        // don't care about on-screen suppression.)
-        after(base + 10.8) {
-            guard AXPermission.trusted else {
-                self.skippedAXPhases = true
-                print("rig: NOTE — Accessibility not granted; Tier-2 live phases skipped")
-                return
-            }
-            let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
-            let proc = Process()
-            proc.executableURL = exe
-            proc.arguments = ["--helper-window"]
-            do {
-                try proc.run()
-                self.helper = proc
-            } catch {
-                self.check("helper process launched", false)
-            }
-        }
-        after(base + 11.5) {
-            guard !self.skippedAXPhases, let pid = self.helper?.processIdentifier else { return }
-            self.engine.debugTier2Attach(pid: pid_t(pid))
-        }
-        after(base + 12.0) {
-            guard !self.skippedAXPhases, let pid = self.helper?.processIdentifier else { return }
-            let st = self.engine.debugTier2State(pid: pid_t(pid))
-            self.check("tier2 attached to helper", st.attached)
-            self.check("helper not degraded at attach", !st.degraded)
-            self.axEventsAtProbe = st.eventsSeen
-        }
-        after(base + 13.6) {
-            guard !self.skippedAXPhases, let pid = self.helper?.processIdentifier else { return }
-            let st = self.engine.debugTier2State(pid: pid_t(pid))
-            let delta = st.eventsSeen - self.axEventsAtProbe
-            self.check("AX window-moved events received (\(delta) in 1.6s)", delta >= 3)
-            self.check("engine wake pipeline fired (\(self.engine.debugTier2WakeCount) wakes)",
-                       self.engine.debugTier2WakeCount >= 1)
-            self.helper?.terminate()
-        }
-
-        // Quiescence.
-        after(base + 14.6) {
-            self.check("display link paused after settling", !self.engine.displayLinkActive)
-            self.finish()
-        }
-    }
-
-    // MARK: - Checks
 
     private func id(of w: NSWindow) -> CGWindowID {
         CGWindowID(exactly: w.windowNumber) ?? 0
     }
 
-    private func checkAnchorOnTop(of w: NSWindow, _ name: String) {
-        let dy = abs(engine.anchor.y - w.frame.maxY)
-        check(String(format: "%@ (Δy %.2fpt)", name, dy), dy <= 1.5)
-        let onSpan = engine.anchor.x >= w.frame.minX - 2 && engine.anchor.x <= w.frame.maxX + 2
-        check("\(name): within window span", onSpan)
+    // MARK: - Step machinery
+
+    private func step(_ name: String? = nil, timeout: TimeInterval = 4,
+                      action: @escaping () -> Void = {},
+                      until: (() -> Bool)? = nil) {
+        steps.append((name, timeout, action, until))
     }
 
-    /// The sprite's feet must sit exactly on the physics anchor.
-    private func checkSpriteMatchesAnchor() {
-        let rect = stage.spriteGlobalRect
-        let feet = CGPoint(x: rect.midX, y: rect.minY + PetEngine.footOverlap)
-        let d = hypot(feet.x - engine.anchor.x, feet.y - engine.anchor.y)
-        check(String(format: "sprite feet on anchor (err %.2fpt)", d), d <= 1.0)
+    /// Instant assertion evaluated in order with the steps.
+    private func assertNow(_ name: String, _ cond: @escaping () -> Bool) {
+        step(name, timeout: 0.8, until: cond)
+    }
+
+    private func runStep(_ i: Int) {
+        guard i < steps.count else { finish(); return }
+        let s = steps[i]
+        s.action()
+        guard let until = s.until else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.runStep(i + 1) }
+            return
+        }
+        let deadline = Date().addingTimeInterval(s.timeout)
+        func poll() {
+            if until() {
+                if let n = s.name { self.check(n, true) }
+                self.runStep(i + 1)
+                return
+            }
+            if Date() > deadline {
+                self.check(s.name ?? "step \(i) wait", false)
+                self.runStep(i + 1)
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: poll)
+        }
+        poll()
     }
 
     private func check(_ name: String, _ ok: Bool) {
@@ -328,21 +105,476 @@ final class TestRig {
         if !ok { failures.append(name) }
     }
 
-    private func finish() {
-        var notes: [String] = []
-        if skippedWindowPhases { notes.append("window phases SKIPPED — suppressive environment") }
-        if skippedAXPhases { notes.append("AX phases SKIPPED — no Accessibility") }
-        let suffix = notes.isEmpty ? "" : " (\(notes.joined(separator: "; ")))"
-        if failures.isEmpty {
-            print("RIG PASS \(checks)/\(checks)\(suffix)")
-            exit(0)
-        } else {
-            print("RIG FAIL \(checks - failures.count)/\(checks)\(suffix) — failed: \(failures.joined(separator: "; "))")
-            exit(1)
-        }
+    private func onTop(of w: NSWindow) -> Bool {
+        abs(engine.anchor.y - w.frame.maxY) <= 1.5
+            && engine.anchor.x >= w.frame.minX - 2
+            && engine.anchor.x <= w.frame.maxX + 2
     }
 
-    private func after(_ s: TimeInterval, _ block: @escaping () -> Void) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + s, execute: block)
+    private func spriteOnAnchor() -> Bool {
+        let rect = stage.spriteGlobalRect
+        let feet = CGPoint(x: rect.midX, y: rect.minY + PetEngine.footOverlap)
+        return hypot(feet.x - engine.anchor.x, feet.y - engine.anchor.y) <= 1.0
+    }
+
+    // MARK: - Scenario
+
+    func run() {
+        engine.autonomy = false
+        engine.greetingEnabled = false
+        engine.onStatus = { [weak self] text in self?.lastStatus = text }
+        engine.allowOwnWindows = true
+        engine.debugForcePID = ProcessInfo.processInfo.processIdentifier
+        engine.world.restrictPID = ProcessInfo.processInfo.processIdentifier
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 150) {
+            print("RIG FAIL timeout — scenario did not complete")
+            exit(2)
+        }
+
+        buildScenario()
+        runStep(0)
+    }
+
+    private func buildScenario() {
+        // ---- Part B: window terrain ----
+        step("rig windows mapped on screen", timeout: 6, action: {
+            self.winA = self.makeWindow(CGRect(x: 200, y: 150, width: 700, height: 300), title: "Rig A")
+            self.winB = self.makeWindow(CGRect(x: 350, y: 560, width: 500, height: 260), title: "Rig B")
+        }, until: { self.mapped(self.winA) && self.mapped(self.winB) })
+
+        step("spawned onto B", timeout: 6, action: { self.engine.start() },
+             until: { self.engine.stateName == "standing" && self.engine.currentWindowID == self.id(of: self.winB) })
+        assertNow("sprites loaded (18 frames)") { self.engine.spriteFrameCount >= 17 }
+        assertNow("perched on B's title bar") { self.onTop(of: self.winB) }
+        assertNow("pet visible") { self.stage.isPetVisible }
+        assertNow("sprite feet on anchor") { self.spriteOnAnchor() }
+
+        step("falling after B closed", timeout: 2, action: {
+            self.xMark = self.engine.anchor.x
+            self.winB.close()
+        }, until: { self.engine.stateName == "falling" })
+        step("landed on A", timeout: 4,
+             until: { self.engine.stateName == "standing" && self.engine.currentWindowID == self.id(of: self.winA) })
+        assertNow("standing on A's title bar") { self.onTop(of: self.winA) }
+        assertNow("fell straight down") { abs(self.engine.anchor.x - self.xMark) <= 8 }
+
+        step("walking after debugWalk", timeout: 2, action: {
+            self.xMark = self.engine.anchor.x
+            self.engine.debugWalk(dir: 1, duration: 1.0)
+        }, until: { self.engine.stateName == "walking" })
+        step("standing after walk", timeout: 4,
+             until: { self.engine.stateName == "standing" })
+        assertNow("walk distance ≈ 55pt") { abs((self.engine.anchor.x - self.xMark) - 55) <= 16 }
+        assertNow("stayed on A through the walk") { self.onTop(of: self.winA) }
+
+        step("D mapped", timeout: 4, action: {
+            self.winD = self.makeWindow(CGRect(x: 300, y: 640, width: 420, height: 240), title: "Rig D")
+        }, until: { self.mapped(self.winD) })
+        step("leaping toward D", timeout: 2,
+             action: { self.engine.debugLeap(toWindowID: self.id(of: self.winD)) },
+             until: { self.engine.stateName == "leaping" })
+        step("landed on D", timeout: 4,
+             until: { self.engine.stateName == "standing" && self.engine.currentWindowID == self.id(of: self.winD) })
+        assertNow("perched on D") { self.onTop(of: self.winD) }
+
+        step("evicted from D after occlusion", timeout: 4, action: {
+            self.winE = self.makeWindow(CGRect(x: 250, y: 700, width: 560, height: 240), title: "Rig E")
+        }, until: { self.engine.currentWindowID != self.id(of: self.winD) })
+        step("fell back to A", timeout: 5,
+             until: { self.engine.stateName == "standing" && self.engine.currentWindowID == self.id(of: self.winA) })
+
+        step("rode A during drag (Δx = 220pt)", timeout: 5, action: {
+            self.xMark = self.engine.anchor.x
+            self.moveDone = false
+            let start = self.winA.frame.origin
+            let t0 = Date()
+            Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { timer in
+                let p = min(1, Date().timeIntervalSince(t0) / 1.0)
+                self.winA.setFrameOrigin(CGPoint(x: start.x + 220 * p, y: start.y))
+                if p >= 1 { timer.invalidate(); self.moveDone = true }
+            }
+        }, until: { self.moveDone && abs((self.engine.anchor.x - self.xMark) - 220) <= 3 })
+        assertNow("still on A after the ride") { self.onTop(of: self.winA) }
+        assertNow("sprite feet on anchor (post-ride)") { self.spriteOnAnchor() }
+
+        // ---- Part A: floor, hole, climb, grab/throw ----
+        step("standing on the floor", timeout: 5, action: {
+            self.winA.close(); self.winD.close(); self.winE.close()
+            self.engine.debugTeleportToFloor()
+        }, until: {
+            self.engine.stateName == "standing" && self.engine.currentWindowID == nil
+                && abs(self.engine.anchor.y - (NSScreen.screens.first?.visibleFrame.minY ?? 0)) <= 1.5
+        })
+        assertNow("sprite feet on anchor (floor)") { self.spriteOnAnchor() }
+        step(action: {
+            let c = self.stage.spriteGlobalRect
+            self.check("hole opens over creature pixels",
+                       self.engine.debugHole(at: CGPoint(x: c.midX, y: c.midY + 8)))
+            self.check("panel accepts events while hole open", self.stage.holeIsOpen)
+            self.check("no hole between the feet",
+                       !self.engine.debugHole(at: CGPoint(x: c.midX, y: c.minY + 3)))
+            self.check("no hole in empty air",
+                       !self.engine.debugHole(at: CGPoint(x: c.midX + 300, y: c.midY + 200)))
+            self.check("panel click-through when hole closed", !self.stage.holeIsOpen)
+        })
+
+        step("climbing the left wall", timeout: 3, action: {
+            self.climbY0 = self.engine.anchor.y
+            let floor = NSScreen.screens.first?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1512, height: 950)
+            self.engine.debugClimb(side: -1, targetY: floor.minY + 140)
+        }, until: { self.engine.stateName == "climbing" })
+        step("moved up the wall, rotated", timeout: 4, until: {
+            self.engine.anchor.y > self.climbY0 + 18 && self.engine.currentRotationDegrees == -90
+                && abs(self.engine.anchor.x - ((NSScreen.screens.first?.visibleFrame.minX ?? 0) + 4)) <= 1.5
+        })
+        step("back on the floor after wall leap", timeout: 8, until: {
+            self.engine.stateName == "standing" && self.engine.currentWindowID == nil
+                && self.engine.currentRotationDegrees == 0
+        })
+
+        step("grabbed", timeout: 2, action: {
+            let c = self.stage.spriteGlobalRect
+            self.engine.debugGrab(at: CGPoint(x: c.midX, y: c.midY))
+        }, until: { self.engine.stateName == "grabbed" })
+        assertNow("link paused while held") { !self.engine.displayLinkActive }
+        step("followed the drag", timeout: 2, action: {
+            self.engine.debugDrag(to: CGPoint(x: 500, y: 500))
+            self.engine.debugDrag(to: CGPoint(x: 560, y: 540))
+        }, until: { abs(self.engine.anchor.x - 560) <= 1.5 })
+        step("thrown → ballistic", timeout: 2,
+             action: { self.engine.debugRelease(velocity: CGPoint(x: 350, y: 450)) },
+             until: { self.engine.stateName == "leaping" || self.engine.stateName == "falling" })
+        step("landed after throw, carried right", timeout: 5, until: {
+            self.engine.stateName == "standing" && self.engine.anchor.x > 600
+        })
+
+        // ---- Part C: Tier-2 AX events (cross-process) ----
+        step(action: {
+            guard AXPermission.trusted else {
+                print("rig: NOTE — Accessibility not granted; Tier-2 live phases skipped")
+                return
+            }
+            let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+            let p = Process()
+            p.executableURL = exe
+            p.arguments = ["--helper-window"]
+            try? p.run()
+            self.moveHelper = p
+        })
+        step("tier2 attached to helper", timeout: 4, action: {
+            if let pid = self.moveHelper?.processIdentifier {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.engine.debugTier2Attach(pid: pid_t(pid))
+                }
+            }
+        }, until: {
+            guard let pid = self.moveHelper?.processIdentifier else { return true } // skipped
+            let st = self.engine.debugTier2State(pid: pid_t(pid))
+            if st.attached { self.axEventsAtProbe = st.eventsSeen }
+            return st.attached && !st.degraded
+        })
+        step("AX window-moved events received", timeout: 6, until: {
+            guard let pid = self.moveHelper?.processIdentifier else { return true }
+            return self.engine.debugTier2State(pid: pid_t(pid)).eventsSeen - self.axEventsAtProbe >= 3
+        })
+        assertNow("engine wake pipeline fired") {
+            self.moveHelper == nil || self.engine.debugTier2WakeCount >= 1
+        }
+
+        // ---- Part D: behavior brain ----
+        step("S and G mapped", timeout: 6, action: {
+            self.winS = self.makeWindow(CGRect(x: 650, y: 350, width: 300, height: 60), title: "Rig S")
+            self.winG = self.makeWindow(CGRect(x: 700, y: 640, width: 420, height: 100), title: "Rig G")
+        }, until: { self.mapped(self.winS) && self.mapped(self.winG) })
+        step("back on the floor for travel", timeout: 5,
+             action: { self.engine.debugTeleportToFloor() },
+             until: { self.engine.stateName == "standing" && self.engine.currentWindowID == nil })
+        step("travel planned multi-step", timeout: 2, action: {
+            self.engine.debugResetBrain(seed: 99, needs: NeedsVector(
+                energy: 0.95, curiosity: 1.0, attention: 1.0, boredom: 0.9))
+            self.engine.debugTravel(to: self.id(of: self.winG))
+        }, until: { self.engine.debugLastPlanCount >= 2 && self.engine.debugTravelActive })
+        step("arrived on G via planned route", timeout: 10,
+             until: { self.engine.currentWindowID == self.id(of: self.winG) && self.engine.stateName == "standing" })
+        assertNow("perched on G") { self.onTop(of: self.winG) }
+
+        step("exhaustion → sleeping", timeout: 3, action: {
+            self.engine.debugSetNeeds(NeedsVector(energy: 0.05, curiosity: 0.2,
+                                                  attention: 0.2, boredom: 0.2))
+            self.engine.debugDecideNow()
+        }, until: { self.engine.isSleeping && self.engine.debugAnimKind == "sleep" })
+        step("link paused while sleeping", timeout: 3,
+             until: { !self.engine.displayLinkActive })
+        step("recharged → awake", timeout: 3, action: {
+            self.engine.debugSetNeeds(NeedsVector(energy: 0.95))
+            self.engine.debugDecideNow()
+        }, until: { !self.engine.isSleeping && self.engine.debugAnimKind != "sleep" })
+
+        // ---- Part E: reactions ----
+        step("immersion → retreated to floor and napping", timeout: 16, action: {
+            let f = NSScreen.screens.first?.frame ?? CGRect(x: 0, y: 0, width: 1512, height: 982)
+            self.winI = self.makeWindow(f, title: "Rig I (fullscreen)")
+        }, until: {
+            self.engine.immersionActive && self.engine.isSleeping
+                && self.engine.currentWindowID == nil
+        })
+        assertNow("immersion status") { self.lastStatus.contains("Shh") }
+        step("immersion ended → awake", timeout: 6,
+             action: { self.winI.close() },
+             until: { !self.engine.immersionActive && !self.engine.isSleeping })
+
+        step("celebration hop + status", timeout: 3, action: {
+            self.engine.debugSimulateAppQuit(bundleID: "com.hnc.Discord", name: "Discord")
+        }, until: { self.lastStatus.contains("🎉") })
+        step("celebration finished", timeout: 5,
+             until: { self.engine.stateName == "standing" })
+
+        step("greeting satisfied attention", timeout: 3, action: {
+            self.engine.debugSimulateUserReturn(awaySeconds: 200)
+        }, until: {
+            self.lastStatus.contains("Welcome back") && self.engine.debugNeeds.attention <= 0.01
+        })
+        step("settled after greeting", timeout: 5,
+             until: { self.engine.stateName == "standing" })
+
+        step(action: {
+            guard AXPermission.trusted else { return }
+            let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+            let p = Process()
+            p.executableURL = exe
+            p.arguments = ["--helper-title-spam"]
+            try? p.run()
+            self.spamHelper = p
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.engine.debugTier2Attach(pid: pid_t(p.processIdentifier))
+            }
+        })
+        step("title-change rate sensed", timeout: 8, until: {
+            guard let pid = self.spamHelper?.processIdentifier else { return true }
+            return self.engine.debugTitleRate(pid: pid_t(pid)) >= 0.8
+        })
+
+        step("back on G for agitation", timeout: 10,
+             action: { self.engine.debugTravel(to: self.id(of: self.winG)) },
+             until: { self.engine.currentWindowID == self.id(of: self.winG) && self.engine.stateName == "standing" })
+        step("agitated pacing on the hot window", timeout: 5, action: {
+            self.engine.debugBumpTitleRate(pid: ProcessInfo.processInfo.processIdentifier, hits: 6)
+        }, until: { self.engine.stateName == "walking" && self.lastStatus.contains("👀") })
+
+        // Ceiling hang: a window whose top edge is too close to the screen
+        // top for the body to fit upright → he flips and dangles.
+        step("hanging upside down at a screen-top edge", timeout: 8, action: {
+            let vf = NSScreen.screens.first?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1512, height: 944)
+            let top = min(vf.maxY, (NSScreen.screens.first?.frame.maxY ?? 982)
+                          - (NSScreen.screens.first?.safeAreaInsets.top ?? 38))
+            self.winH = self.makeWindow(CGRect(x: 340, y: top - 170, width: 420, height: 160),
+                                        title: "Rig H")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.engine.debugTravel(to: self.id(of: self.winH))
+            }
+        }, until: {
+            self.engine.currentWindowID == self.id(of: self.winH)
+                && self.engine.currentRotationDegrees == 180
+        })
+        step("upright again after the high window closes", timeout: 8, action: {
+            self.winH.close()
+        }, until: {
+            self.engine.stateName == "standing"
+                && self.engine.currentWindowID != self.id(of: self.winH)
+                && self.engine.currentRotationDegrees == 0
+        })
+
+        // ---- Part F: Shimeji pack import + live hot-swap ----
+        step("synthetic shimeji pack imported", timeout: 5, action: {
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rig-shimeji-\(ProcessInfo.processInfo.processIdentifier)")
+            let fm = FileManager.default
+            try? fm.createDirectory(at: dir.appendingPathComponent("conf"),
+                                    withIntermediateDirectories: true)
+            try? fm.createDirectory(at: dir.appendingPathComponent("img"),
+                                    withIntermediateDirectories: true)
+            let xml = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <Mascot xmlns="http://www.group-finity.com/Mascot">
+              <ActionList>
+                <Action Name="Stand" Type="Stay" BorderType="Floor">
+                  <Animation><Pose Image="/shime1.png" ImageAnchor="64,128" Velocity="0,0" Duration="250" /></Animation>
+                </Action>
+                <Action Name="Walk" Type="Move" BorderType="Floor">
+                  <Animation>
+                    <Pose Image="/shime1.png" Velocity="-2,0" Duration="6" />
+                    <Pose Image="/shime2.png" Velocity="-2,0" Duration="6" />
+                    <Pose Image="/shime3.png" Velocity="-2,0" Duration="6" />
+                  </Animation>
+                </Action>
+                <Action Name="Falling" Type="Embedded" Class="com.group_finity.mascot.action.Fall">
+                  <Animation><Pose Image="/shime4.png" Duration="4" /></Animation>
+                </Action>
+                <Action Name="Bouncing" Type="Embedded" Class="com.group_finity.mascot.action.Bouncing">
+                  <Animation>
+                    <Pose Image="/shime18.png" Duration="2" />
+                    <Pose Image="/shime19.png" Duration="2" />
+                  </Animation>
+                </Action>
+                <Action Name="Pinched" Type="Embedded" Class="com.group_finity.mascot.action.Dragged">
+                  <Animation><Pose Image="/shime5.png" Duration="2" /></Animation>
+                </Action>
+              </ActionList>
+            </Mascot>
+            """
+            try? xml.data(using: .utf8)?.write(to: dir.appendingPathComponent("conf/actions.xml"))
+            for (name, hue) in [("shime1", 0.05), ("shime2", 0.30), ("shime3", 0.55),
+                                ("shime4", 0.80), ("shime18", 0.12), ("shime19", 0.62),
+                                ("shime5", 0.40)] {
+                let img = NSImage(size: NSSize(width: 128, height: 128))
+                img.lockFocus()
+                NSColor(calibratedHue: hue, saturation: 0.7, brightness: 0.9, alpha: 1).setFill()
+                NSBezierPath(ovalIn: CGRect(x: 6, y: 6, width: 116, height: 116)).fill()
+                img.unlockFocus()
+                if let tiff = img.tiffRepresentation,
+                   let rep = NSBitmapImageRep(data: tiff),
+                   let png = rep.representation(using: .png, properties: [:]) {
+                    try? png.write(to: dir.appendingPathComponent("img/\(name).png"))
+                }
+            }
+            self.shimejiResult = ShimejiImporter.load(packAt: dir)
+        }, until: { self.shimejiResult != nil })
+        step(action: {
+            guard let (set, name) = self.shimejiResult else { return }
+            self.check("pack name from directory", name.hasPrefix("rig-shimeji"))
+            self.check("walk has 3 frames", set.anims[.walk]?.frames.count == 3)
+            self.check("land (Bouncing) has 2 frames", set.anims[.land]?.frames.count == 2)
+            self.check("jump mapped from Pinched", set.anims[.jump]?.frames.count == 1)
+            self.check("sleep fell back to idle", set.anims[.sleep]?.frames.count == 1)
+            self.check("imported art faces left", set.facesLeft)
+            let d = set.anims[.walk]?.durations.first ?? 0
+            self.check("tick durations mapped (6 ticks → 0.24s)", abs(d - 0.24) < 0.001)
+        })
+        step("hot-swapped character, pet alive", timeout: 3, action: {
+            if let (set, _) = self.shimejiResult {
+                self.engine.applySprites(set, name: "rig-shimeji")
+            }
+        }, until: {
+            self.stage.isPetVisible && self.spriteOnAnchor()
+                && self.engine.spriteFrameCount == 10
+        })
+        step(action: {
+            let c = self.stage.spriteGlobalRect
+            self.check("hole works on imported art (center)",
+                       self.engine.debugHole(at: CGPoint(x: c.midX, y: c.midY)))
+            self.check("hole shut at imported art corner",
+                       !self.engine.debugHole(at: CGPoint(x: c.minX + 2, y: c.minY + 2)))
+        })
+        step("swapped back to Rusty", timeout: 3, action: {
+            self.engine.applySprites(SpriteSet(), name: "Rusty")
+        }, until: { self.engine.spriteFrameCount >= 17 && self.stage.isPetVisible })
+
+        step("speech bubble shows", timeout: 2, action: {
+            self.engine.debugSay("Beep! Bubble check.", hold: 1.2)
+        }, until: { self.stage.bubbleVisible && self.stage.debugBubbleText.contains("Beep") })
+        step("speech bubble auto-hides", timeout: 4,
+             until: { !self.stage.bubbleVisible })
+
+        step("speech bubble auto-hides after assistant checks", timeout: 4,
+             until: { !self.stage.bubbleVisible })
+
+        runAssistantChecks()
+
+        step("quiesced (link paused, agitation decayed)", timeout: 14, until: {
+            self.engine.stateName == "standing" && !self.engine.displayLinkActive
+        })
+    }
+
+    /// Part G: the assistant surface. Everything here runs offline against
+    /// the real objects (no API calls), covering the pieces that used to have
+    /// unit tests but no end-to-end proof inside a running app: the panel's
+    /// lifecycle, the gating that protects destructive verbs, memory
+    /// persistence, and the streaming accumulator feeding real rows.
+    private func runAssistantChecks() {
+        let bar = CommandBar()
+
+        step("assistant panel opens and closes", timeout: 3, action: {
+            bar.show()
+        }, until: { bar.isVisible })
+        step(action: {
+            bar.dismiss()
+            self.check("panel dismissed", !bar.isVisible)
+        })
+
+        step("voice transcript lands in the panel", timeout: 3, action: {
+            bar.beginVoice()
+            bar.voiceTranscript("open saf")
+            bar.voiceTranscript("open safari")
+        }, until: { bar.isVisible && bar.debugTranscript.contains("open safari") })
+
+        step("empty capture ends quietly, no error row", timeout: 3, action: {
+            bar.endVoiceQuietly()
+        }, until: { !bar.debugTranscript.contains("open safari") })
+
+        step(action: {
+            bar.dismiss()
+            // Destructive verbs must never execute straight from a tool call.
+            self.check("quit is gated",
+                       AssistantRouting.action(verb: "quit", argument: "Finder")!.needsConfirmation)
+            self.check("admin is gated",
+                       AssistantRouting.action(verb: "run_admin", argument: "whoami")!.needsConfirmation)
+            self.check("destructive script is gated",
+                       AssistantRouting.action(verb: "run_applescript",
+                                               argument: "do shell script \"rm -rf x\"")!.needsConfirmation)
+            self.check("harmless script is not gated",
+                       !AssistantRouting.action(verb: "run_applescript",
+                                                argument: "display notification \"hi\"")!.needsConfirmation)
+            self.check("bad url refused",
+                       AssistantRouting.action(verb: "open_url", argument: "javascript:alert(1)") == nil)
+        })
+
+        step(action: {
+            // Memory has to survive a real write and read from disk.
+            let original = PetMemoryStore.load()
+            var probe = PetMemory()
+            probe.remember("rig probe fact about tin robots")
+            PetMemoryStore.save(probe)
+            let reloaded = PetMemoryStore.load()
+            self.check("memory persists to disk",
+                       reloaded.facts.contains { $0.text.contains("rig probe fact") })
+            self.check("memory reaches the prompt",
+                       reloaded.promptBlock.contains("rig probe fact"))
+            PetMemoryStore.save(original)  // leave the user's memory untouched
+            self.check("rig restored real memory",
+                       PetMemoryStore.load().facts.count == original.facts.count)
+        })
+
+        step(action: {
+            // The streaming path assembles a usable turn from raw SSE lines.
+            let acc = StreamAccumulator()
+            var streamed = ""
+            acc.onTextDelta = { streamed += $0 }
+            acc.consume(line: #"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#)
+            acc.consume(line: #"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"All set."}}"#)
+            acc.consume(line: #"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#)
+            self.check("stream emitted deltas live", streamed == "All set.")
+            if case .turn(let turn) = acc.finish() {
+                self.check("stream assembled a finished turn", turn.text == "All set.")
+            } else {
+                self.check("stream assembled a finished turn", false)
+            }
+        })
+
+        step(action: {
+            let binding = HotKeyStore.current
+            self.check("summon shortcut is valid", binding.isValid)
+            self.check("shortcut has a readable name", !binding.displayName.isEmpty)
+        })
+    }
+
+    private func finish() {
+        if failures.isEmpty {
+            print("RIG PASS \(checks)/\(checks)")
+            exit(0)
+        } else {
+            print("RIG FAIL \(checks - failures.count)/\(checks) — failed: \(failures.joined(separator: "; "))")
+            exit(1)
+        }
     }
 }

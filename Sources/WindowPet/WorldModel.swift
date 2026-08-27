@@ -89,6 +89,30 @@ final class WorldModel {
         return Platform(kind: .floor, topY: f.minY, minX: f.minX, maxX: f.maxX)
     }
 
+    /// The frontmost window when it's maximized-or-larger (≥90% of its
+    /// screen) but not truly fullscreen — the "user is focused on one big
+    /// thing" signal that quiets the pet.
+    func maximizedFrontWindow() -> WinAK? {
+        guard let front = windows.first, let cov = coverage(of: front) else { return nil }
+        return cov >= 0.90 && !ReactionPolicy.isImmersive(coverage: cov) ? front : nil
+    }
+
+    private func coverage(of w: WinAK) -> CGFloat? {
+        let screen = NSScreen.screens.first { $0.frame.intersects(w.frame) }
+            ?? NSScreen.screens.first
+        guard let screen else { return nil }
+        let i = w.frame.intersection(screen.frame)
+        return (i.width * i.height) / max(1, screen.frame.width * screen.frame.height)
+    }
+
+    /// The frontmost window if it essentially covers its whole screen —
+    /// fullscreen video/games. Coverage is judged against the screen's FULL
+    /// frame, so a maximized window under a visible menu bar doesn't count.
+    func immersionWindow() -> WinAK? {
+        guard let front = windows.first, let cov = coverage(of: front) else { return nil }
+        return ReactionPolicy.isImmersive(coverage: cov) ? front : nil
+    }
+
     static func primaryScreenHeight() -> CGFloat {
         NSScreen.screens.first?.frame.height ?? 1080
     }
