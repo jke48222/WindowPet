@@ -9,10 +9,14 @@ final class ClaudeAgentTests: XCTestCase {
         let tools = ClaudeAgent.toolDefinitions
         let names = tools.compactMap { $0["name"] as? String }
         // "none" is conversation, not a tool; everything else is callable.
-        XCTAssertEqual(Set(names), Set(AssistantRouting.verbs.filter { $0 != "none" }))
+        // Anthropic-hosted web tools ride alongside the client verbs.
+        XCTAssertEqual(Set(names),
+                       Set(AssistantRouting.verbs.filter { $0 != "none" })
+                           .union(ClaudeAgent.serverToolNames))
         XCTAssertFalse(names.contains("none"))
 
-        for tool in tools {
+        // Server tools carry no schema of ours; only client tools are checked.
+        for tool in tools where !ClaudeAgent.serverToolNames.contains(tool["name"] as? String ?? "") {
             let description = try XCTUnwrap(tool["description"] as? String)
             XCTAssertFalse(description.isEmpty, "every tool needs a when-to-call description")
             let schema = try XCTUnwrap(tool["input_schema"] as? [String: Any])
@@ -30,7 +34,8 @@ final class ClaudeAgentTests: XCTestCase {
         // only accepts a real https URL, for instance).
         let sample = ["open_url": "https://example.com", "press_keys": "cmd+t"]
         for name in ClaudeAgent.toolDefinitions.compactMap({ $0["name"] as? String })
-        where !ClaudeAgent.internalVerbs.contains(name) {
+        where !ClaudeAgent.internalVerbs.contains(name)
+            && !ClaudeAgent.serverToolNames.contains(name) {
             XCTAssertNotNil(AssistantRouting.action(verb: name, argument: sample[name] ?? "x"),
                             "\(name) should map to an action")
         }
@@ -42,6 +47,61 @@ final class ClaudeAgentTests: XCTestCase {
         XCTAssertTrue(AssistantRouting.action(verb: "run_admin", argument: "whoami")!.needsConfirmation)
         XCTAssertTrue(AssistantRouting.action(
             verb: "run_applescript", argument: "do shell script \"rm x\"")!.needsConfirmation)
+    }
+
+    // MARK: server-side web tools
+
+    func testWebToolsAreOffered() throws {
+        let tools = ClaudeAgent.toolDefinitions
+        let byName = Dictionary(uniqueKeysWithValues: tools.compactMap { tool -> (String, [String: Any])? in
+            guard let name = tool["name"] as? String else { return nil }
+            return (name, tool)
+        })
+        // Anthropic-hosted: declared by type, with no input_schema of ours.
+        XCTAssertEqual(byName["web_search"]?["type"] as? String, "web_search_20260209")
+        XCTAssertEqual(byName["web_fetch"]?["type"] as? String, "web_fetch_20260209")
+        XCTAssertNil(byName["web_search"]?["input_schema"])
+        // The client-side "search" tool still exists and is distinct: it opens
+        // a page for the user rather than reading the web for Rusty.
+        XCTAssertNotNil(byName["search"]?["input_schema"])
+    }
+
+    func testServerToolsAreNotClientVerbs() {
+        // They must never be routed to the executor or treated as internal.
+        XCTAssertNil(AssistantRouting.action(verb: "web_search", argument: "x"))
+        XCTAssertNil(AssistantRouting.action(verb: "web_fetch", argument: "x"))
+        XCTAssertFalse(ClaudeAgent.internalVerbs.contains("web_search"))
+    }
+
+    func testServerToolUseIsNeverExecutedAsAClientCall() {
+        // server_tool_use ran on Anthropic's side already. Returning a
+        // tool_result for it, or executing it locally, would corrupt the turn.
+        let payload = Data(#"""
+        {"type":"message","stop_reason":"tool_use","content":[
+          {"type":"server_tool_use","id":"srv_1","name":"web_search","input":{"query":"tin robots"}},
+          {"type":"web_search_tool_result","tool_use_id":"srv_1","content":[]},
+          {"type":"tool_use","id":"toolu_1","name":"open","input":{"argument":"Safari"}}]}
+        """#.utf8)
+        guard case .turn(let turn) = ClaudeAgent.parseTurn(payload) else {
+            return XCTFail("expected a turn")
+        }
+        XCTAssertEqual(turn.calls, [.init(id: "toolu_1", name: "open", argument: "Safari")])
+        // All three blocks still echo back for replay.
+        XCTAssertEqual(turn.rawContent.count, 3)
+    }
+
+    func testPauseTurnIsATurnNotAFailure() {
+        // A long server-tool turn pauses; the loop resumes it rather than
+        // treating the empty answer as the final one.
+        let payload = Data(#"""
+        {"type":"message","stop_reason":"pause_turn","content":[
+          {"type":"server_tool_use","id":"srv_1","name":"web_search","input":{"query":"x"}}]}
+        """#.utf8)
+        guard case .turn(let turn) = ClaudeAgent.parseTurn(payload) else {
+            return XCTFail("expected a turn, not a failure")
+        }
+        XCTAssertEqual(turn.stopReason, "pause_turn")
+        XCTAssertTrue(turn.calls.isEmpty)
     }
 
     // MARK: request

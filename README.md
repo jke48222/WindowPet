@@ -117,6 +117,11 @@ surface for every input method: typed, push to talk, or the opt-in "Hey Rusty" w
 route through three tiers, cheapest first: a free local grammar, then Apple's on-device foundation
 model, then Claude over HTTP.
 
+With Claude, requests run as a real tool-use loop: it calls a tool, reads the actual result, and
+picks the next step until the job is done, so a failure becomes an adaptation rather than a false
+"done". It can also search and read the web itself (Anthropic-hosted tools, run server-side), see
+the screen when you ask, and remember what matters between launches.
+
 **Every tier only ever proposes.** Each returns a verb, an argument and a reply. Execution always
 goes through the same gate, and that is the part worth reading.
 
