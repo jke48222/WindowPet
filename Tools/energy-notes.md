@@ -1,21 +1,7 @@
-# WindowPet: Measured Energy
-
-Measured 2026-08-19 on Apple M5 Pro, macOS 27.0, release build.
-Method: self-reported `getrusage` CPU over 15s deterministic phases
-(driven by the same debug hooks as the test rig); RSS via `task_info`.
-Overall: **PASS**
-
-| Phase | What | CPU | Budget | RSS |
-|---|---|---|---|---|
-| sleep | pet asleep, nothing moving | **0.24%** | ≤ 0.3% (hard) | 47.7 MB |
-| perched | awake on a title bar, breathing/blinking | 0.42% | ≤ 1.0% (soft) | 47.6 MB |
-| active | continuous planned travel between two windows | **1.04%** | ≤ 3.0% (hard) | 48.5 MB |
-
-RSS budget: ≤ 80 MB (hard).
-
-Reproduce: `Tools/energy-bench.sh [secondsPerPhase]`, which exits nonzero on
-any hard-budget violation (CI-ready). External cross-check:
-`sudo powermetrics --samplers tasks -i 5000 -n 3 | grep WindowPet`.
+<!-- Hand-written notes appended below the generated block by
+     Tools/energy-bench.sh. Edit this file, not ENERGY.md: ENERGY.md is
+     regenerated on every bench run and anything written there directly is
+     destroyed by the next one. -->
 
 ## Wake word: still unmeasured (2026-08-20)
 
