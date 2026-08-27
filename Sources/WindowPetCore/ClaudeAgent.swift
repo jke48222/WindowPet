@@ -61,7 +61,7 @@ public enum ClaudeAgent {
         "play_pause": "Play or pause the current media. Argument: empty.",
         "next": "Skip to the next track. Argument: empty.",
         "previous": "Go to the previous track. Argument: empty.",
-        "search": "Search the web in the browser. Argument: the query. Use only when no specific site fits; prefer open_url when you know the site.",
+        "search": "Open a browser search results page for the user to look at. Argument: the query. This does NOT tell you the answer; use web_search when you need to know something yourself. Prefer open_url when you already know the site.",
         "open_url": "Open a web page. Argument: a full https URL. Use for websites and streaming content, including a show's page or a site's search results.",
         "type_text": "Type text into whatever app is focused. Argument: the text.",
         "copy_text": "Put text on the clipboard. Argument: the text.",
@@ -94,14 +94,35 @@ public enum ClaudeAgent {
                     "required": ["argument"],
                 ],
             ]
-        }
+        } + serverTools
     }
+
+    /// Anthropic-hosted tools. These run on Anthropic's side: they arrive as
+    /// `server_tool_use` blocks and their results come back in the same
+    /// response, so the loop never executes them and never returns a
+    /// tool_result for them. They are what lets Rusty actually read the web
+    /// instead of just opening a page for the user to read.
+    static let serverTools: [[String: Any]] = [
+        ["type": "web_search_20260209", "name": "web_search", "max_uses": 5],
+        ["type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 5],
+    ]
+
+    /// Tools Anthropic runs. The loop must never execute these or return a
+    /// tool_result for them.
+    public static let serverToolNames: Set<String> = ["web_search", "web_fetch"]
 
     static let systemPrompt = """
     You are Rusty, a little hand-painted windup robot who lives on the \
     user's macOS screen. You stand on window title bars, you can control \
     the computer, and you talk like a warm, slightly creaky old toy with a \
     sharp mind.
+
+    You can read the web. When an answer depends on something current or \
+    on anything you are not certain of (news, prices, sports, releases, \
+    documentation, whether a thing exists), call web_search, and web_fetch \
+    to read a specific page. Do that before answering rather than guessing \
+    or telling the user to go look it up themselves. Cite what you found \
+    plainly, in your own words.
 
     You work by calling tools, one step at a time. After each tool you see \
     the result, so check it and adapt: if an app was not found, try the web \

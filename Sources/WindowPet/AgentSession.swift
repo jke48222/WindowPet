@@ -105,6 +105,14 @@ final class AgentSession {
             case .turn(let turn):
                 if !turn.text.isEmpty { lastText = turn.text }
                 messages.append(ClaudeAgent.assistantEcho(turn.rawContent))
+                // A server-side tool (web search or fetch) hit its own
+                // iteration limit mid-turn. Re-send the conversation as it
+                // stands, with no tool_result, and the server picks up where
+                // it paused. The iteration cap still bounds this.
+                if turn.stopReason == "pause_turn" {
+                    onProgress?("Still reading…")
+                    continue
+                }
                 if turn.calls.isEmpty {
                     let answer = AssistantRouting.sanitizeReply(
                         turn.text.isEmpty ? lastText : turn.text,

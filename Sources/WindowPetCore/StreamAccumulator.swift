@@ -22,6 +22,10 @@ public final class StreamAccumulator {
         var id: String = ""            // tool_use
         var name: String = ""          // tool_use
         var partialJSON: String = ""   // tool_use input, streamed as JSON text
+        /// The block exactly as the server opened it. Server-side tool blocks
+        /// (web search and fetch) are echoed back from this verbatim, since
+        /// anything dropped would corrupt the replayed conversation.
+        var original: [String: Any] = [:]
     }
 
     private var blocks: [Int: Block] = [:]
@@ -64,6 +68,7 @@ public final class StreamAccumulator {
             new.id = block["id"] as? String ?? ""
             new.name = block["name"] as? String ?? ""
             new.text = block["text"] as? String ?? ""
+            new.original = block
             blocks[index] = new
 
         case "content_block_delta":
@@ -144,7 +149,7 @@ public final class StreamAccumulator {
                 var thinking: [String: Any] = ["type": "thinking", "thinking": block.text]
                 if !block.signature.isEmpty { thinking["signature"] = block.signature }
                 rawContent.append(thinking)
-            case "tool_use":
+            case "tool_use", "server_tool_use":
                 let input: [String: Any]
                 if let data = block.partialJSON.data(using: .utf8),
                    let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
@@ -152,13 +157,20 @@ public final class StreamAccumulator {
                 } else {
                     input = [:]  // empty-argument tools stream no JSON at all
                 }
-                rawContent.append(["type": "tool_use", "id": block.id,
-                                   "name": block.name, "input": input])
-                calls.append(ClaudeAgent.ToolCall(id: block.id, name: block.name,
-                                                  argument: (input["argument"] as? String) ?? ""))
+                var rebuilt = block.original
+                rebuilt["input"] = input
+                rawContent.append(rebuilt)
+                // Only client tools become calls to execute. Server tools
+                // (web search and fetch) already ran on Anthropic's side and
+                // must never get a tool_result from us.
+                if block.type == "tool_use" {
+                    calls.append(ClaudeAgent.ToolCall(id: block.id, name: block.name,
+                                                      argument: (input["argument"] as? String) ?? ""))
+                }
             default:
-                // Unknown block types are echoed as-is so replay stays valid.
-                rawContent.append(["type": block.type])
+                // Server tool results and anything else unrecognized are
+                // echoed exactly as received so replay stays valid.
+                rawContent.append(block.original.isEmpty ? ["type": block.type] : block.original)
             }
         }
 
