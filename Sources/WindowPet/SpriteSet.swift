@@ -5,7 +5,9 @@ import AppKit
 /// Frame swaps are plain CALayer contents changes — GPU-composited, near-free.
 final class SpriteSet {
 
-    enum Kind: String, CaseIterable { case idle, blink, walk, jump, fall, land }
+    enum Kind: String, CaseIterable {
+        case idle, blink, walk, jump, fall, land, sleep, lookAround, fidget
+    }
 
     /// One drawable frame: image + its hit mask.
     struct Frame {
@@ -51,10 +53,27 @@ final class SpriteSet {
 
     private(set) var anims: [Kind: Anim] = [:]
     private(set) var loadedFrameCount = 0
+    /// Classic Shimeji art faces left; ours faces right. The stage flips
+    /// accordingly so walking never moonwalks.
+    let facesLeft: Bool
 
-    init() {
+    /// Imported character: provided anims, missing kinds fall back to idle.
+    init(anims provided: [Kind: Anim], facesLeft: Bool) {
+        self.facesLeft = facesLeft
+        anims = provided
+        if let idle = provided[.idle] {
+            for kind in Kind.allCases where anims[kind] == nil {
+                anims[kind] = Anim(frames: [idle.frames[0]], durations: [1], loops: false)
+            }
+        }
+        loadedFrameCount = provided.values.reduce(0) { $0 + $1.frames.count }
+    }
+
+    init(skin: String = SkinTheme.currentID) {
+        facesLeft = false
         func img(_ name: String) -> CGImage? {
-            guard let url = Bundle.module.url(forResource: name, withExtension: "png"),
+            let full = name.replacingOccurrences(of: "pet_", with: "pet_\(skin)_")
+            guard let url = Bundle.module.url(forResource: full, withExtension: "png"),
                   let ns = NSImage(contentsOf: url),
                   ns.size.width > 4 else { return nil }
             return ns.cgImage(forProposedRect: nil, context: nil, hints: nil)
@@ -70,11 +89,16 @@ final class SpriteSet {
         build(.idle, ["pet_idle_0", "pet_idle_1", "pet_idle_0", "pet_idle_2"],
               [0.55, 0.5, 0.55, 0.6], loops: true)
         build(.blink, ["pet_blink_0"], [0.13], loops: false)
-        build(.walk, (0..<6).map { "pet_walk_\($0)" },
-              Array(repeating: 0.09, count: 6), loops: true)
+        build(.walk, (0..<10).map { "pet_walk_\($0)" },
+              Array(repeating: 0.07, count: 10), loops: true)
         build(.jump, ["pet_jump_0"], [0.4], loops: false)
         build(.fall, ["pet_fall_0", "pet_fall_1"], [0.11, 0.11], loops: true)
         build(.land, ["pet_land_0", "pet_land_1"], [0.10, 0.08], loops: false)
+        build(.sleep, ["pet_sleep_0", "pet_sleep_1"], [1.15, 1.15], loops: true)
+        build(.lookAround, ["pet_look_0", "pet_look_1", "pet_look_2"],
+              [0.55, 0.6, 0.35], loops: false)
+        build(.fidget, (0..<4).map { "pet_fidget_\($0)" },
+              Array(repeating: 0.13, count: 4), loops: false)
 
         // Any missing animation falls back to a static placeholder — the app
         // must run (visibly wrong, not crashed) even with no art at all.
@@ -104,9 +128,18 @@ final class SpriteSet {
 final class AnimationClock {
     private var anim: SpriteSet.Anim?
     private(set) var currentKind: SpriteSet.Kind?
+    var currentKindName: String { currentKind?.rawValue ?? "none" }
     private var idx = 0
     private var nextAt: TimeInterval = 0
     private(set) var finished = true
+
+    /// Forget the current animation so the next play() starts fresh — used
+    /// when the sprite SET itself changes (character swap).
+    func reset() {
+        anim = nil
+        currentKind = nil
+        finished = true
+    }
 
     @discardableResult
     func play(_ kind: SpriteSet.Kind, from set: SpriteSet, at now: TimeInterval) -> SpriteSet.Frame? {
