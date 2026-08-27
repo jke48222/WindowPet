@@ -22,7 +22,7 @@ P=($(row perched)); S=($(row sleep)); A=($(row active))
 VERDICT=$(grep "BENCH DONE" "$LOG" | awk '{print $3}')
 
 cat > ENERGY.md <<MD
-# WindowPet — Measured Energy
+# WindowPet: Measured Energy
 
 Measured $DATE on $CHIP, macOS $OSV, release build.
 Method: self-reported \`getrusage\` CPU over ${PHASE}s deterministic phases
@@ -37,9 +37,19 @@ Overall: **$VERDICT**
 
 RSS budget: ≤ 80 MB (hard).
 
-Reproduce: \`Tools/energy-bench.sh [secondsPerPhase]\` — exits nonzero on any
-hard-budget violation (CI-ready). External cross-check:
+Reproduce: \`Tools/energy-bench.sh [secondsPerPhase]\`, which exits nonzero on
+any hard-budget violation (CI-ready). External cross-check:
 \`sudo powermetrics --samplers tasks -i 5000 -n 3 | grep WindowPet\`.
 MD
-echo "---- ENERGY.md written ----"
+
+# The hand-written half lives in Tools/energy-notes.md and is appended after
+# the generated block. It used to live in ENERGY.md itself, where every bench
+# run destroyed it.
+if [ -f Tools/energy-notes.md ]; then
+  printf '\n' >> ENERGY.md
+  sed '/^<!--/,/-->$/d' Tools/energy-notes.md | sed '/./,$!d' >> ENERGY.md
+  echo "---- ENERGY.md written (generated block + Tools/energy-notes.md) ----"
+else
+  echo "---- ENERGY.md written ----"
+fi
 exit $RC

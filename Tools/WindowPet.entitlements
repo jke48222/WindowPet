@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Under the hardened runtime a protected resource needs its entitlement
+       as well as the TCC grant. Without this the microphone is denied with no
+       prompt and no error, which is exactly the failure that is hardest to
+       diagnose later.
+
+       Microphone: push to talk, and the opt-in wake word. -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+
+  <!-- Apple events: run_applescript is how Rusty reaches Notes, Reminders,
+       Calendar, Music and System Events. Every script still passes the
+       confirmation gate before it runs, and macOS still asks per target app
+       the first time. -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+</dict>
+</plist>

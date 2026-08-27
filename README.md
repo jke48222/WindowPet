@@ -255,9 +255,11 @@ observer sees genuine cross-process events, then asserts against the running cre
 
 The total is a **runtime tally**, not something a static count of the source can settle: the rig
 increments once per named step that resolves plus each explicit check. Runs on 2026-08-27 gave
-93 of 93 repeatedly, with one 90 of 93 and one 86 of 93 while a background sync process was pinning
-a core; every one of those failures was in the planned-travel phase timing out. Removing the
-process restored 93 of 93. **Treat 93 of 93 as the expected result and planner travel as the part
+93 of 93 repeatedly, with a 90, an 87 and an 86 recorded while the machine was loaded (a background
+sync process pinning a core, then a load average above 5 with the window server at 18%). The failing
+checks in all three were window choreography timing out, and the sets differed run to run rather
+than repeating, which is the signature of load rather than a regression. Three consecutive 93 of 93
+followed once the machine was quiet. **Treat 93 of 93 as the expected result and planner travel as the part
 that is timing sensitive under load.** The rig is built to wait rather than assert against wall
 clock choreography, but that phase has the least slack.
 
@@ -378,36 +380,43 @@ pack can be imported and hot swapped while the creature is running: their art, t
 
 ## Status
 
-Built, running, and packaged locally as an app bundle and a drag-to-Applications DMG (2.8 MB).
+Built, running, and packaged locally as a universal app bundle and a drag-to-Applications DMG (3.0 MB).
 `codesign --verify --deep --strict` passes. It is **not ready to hand to anyone else**, and the
 reasons are specific.
 
-**Distribution, in the order it needs fixing:**
+**Distribution. One thing is left, and it is not code.**
 
 - **The signature is a development certificate, not a distribution one.** The app is signed
   `Apple Development: j.edusei@icloud.com`, team `PK389W6V96`. Distribution requires a
   Developer ID Application certificate, which requires Apple Developer Program enrollment.
-- **It is not notarized**, and cannot be until the certificate above changes. `spctl` currently
-  rejects both the app and the DMG. On anyone else's Mac this DMG trips Gatekeeper.
-- **The DMG itself is unsigned**, and no notarization ticket is stapled to it.
-- **Hardened runtime is off** on the current build, because `make-app.sh` took its fallback branch.
-  Turning it on is one flag, and notarization requires it anyway.
-- **There is no version tag in git.** The `1.0.0` in the app's Info.plist is not backed by a tag or
-  a release.
+  Everything downstream of that is already wired: `Tools/make-dist.sh --notarize` signs the DMG,
+  submits it, staples the ticket and verifies the result the way Gatekeeper will.
+- **It is not notarized**, and cannot be until the certificate above exists. `spctl` currently
+  rejects both the app and the DMG, so on anyone else's Mac this DMG trips Gatekeeper.
 
-`Tools/make-app.sh` already prefers a Developer ID identity and applies the hardened runtime when
-one is present, so this is an enrollment problem rather than a code problem.
+Fixed since 1.0.0:
+
+- **Hardened runtime is on**, on every signing branch rather than only the Developer ID one, so
+  what runs daily is what notarization will accept. It needs entitlements as well as TCC grants:
+  [`Tools/WindowPet.entitlements`](Tools/WindowPet.entitlements) declares
+  `device.audio-input` for the microphone and `automation.apple-events` for the AppleScript
+  tool. Without them the microphone is denied with no prompt and no error, which is the kind of
+  failure that is worst to discover at submission time.
+- **The build is universal**, arm64 and x86_64, both slices stamped at the macOS 14 minimum.
+- **The DMG is signed** when a Developer ID identity is present, and says plainly that it is not
+  when one is absent.
+- **`v1.1.0` is tagged in git** and matches the Info.plist.
 
 **Other known gaps:**
 
 - **The wake word's energy cost is unmeasured**, for the reason given above. Granting the installed
   app Microphone and Speech Recognition permission and re-running the benchmark is the fix.
-- **`ENERGY.md` is overwritten by `energy-bench.sh`.** The hand-written note about the wake word
-  measurement sits below the generated block and will be destroyed by the next run.
+- **The wake word note now survives a bench run.** It lives in
+  [`Tools/energy-notes.md`](Tools/energy-notes.md) and `energy-bench.sh` appends it below the
+  generated block, rather than sitting inside `ENERGY.md` where every run destroyed it.
 - **The planner travel phase of the rig is timing sensitive** under load, as described above.
 - **No screen recording or demo clip exists**, which for a project whose entire pitch is visual is
   the single most valuable missing asset.
-- **Apple silicon only.** The build is thin arm64, not universal.
 - **Multi-display behavior is tested as policy, not on hardware.** The 13 tests in
   [`DisplayChoiceTests.swift`](Tests/WindowPetCoreTests/DisplayChoiceTests.swift) cover the rules
   for picking a display and clamping to it, but every run so far has been on one screen.
