@@ -12,6 +12,9 @@ enum ClaudeRouter {
         case unauthorized
         case refused
         case failed(String)
+        /// The daily spend ceiling stopped the call. Carries the sentence to
+        /// show the user, so no caller has to reconstruct it.
+        case overBudget(String)
     }
 
     static var apiKey: String? {
@@ -40,6 +43,8 @@ enum ClaudeRouter {
             return "The API key was rejected. Paste a fresh one under Anthropic API Key…"
         } catch RouterError.refused {
             return "Claude declined the test request, but the key and connection work."
+        } catch RouterError.overBudget(let message) {
+            return message
         } catch RouterError.failed(let message) {
             return "Claude call failed: \(message)"
         } catch {
@@ -50,6 +55,9 @@ enum ClaudeRouter {
     static func route(_ text: String, context: String,
                       history: [(role: String, text: String)] = []) async throws
         -> ClaudeRouting.Route {
+        if let blocked = await UsageMeter.shared.blockedMessage {
+            throw RouterError.overBudget(blocked)
+        }
         guard let key = apiKey,
               let spec = ClaudeRouting.routeRequest(text: text, context: context,
                                                     apiKey: key, history: history,
@@ -74,6 +82,7 @@ enum ClaudeRouter {
     /// user's question about it. Returns a spoken answer (or an honest
     /// explanation of what went wrong). Read-only, so no gating.
     static func look(question: String) async -> String {
+        if let blocked = await UsageMeter.shared.blockedMessage { return blocked }
         guard let key = apiKey else {
             return "I need the Claude brain to see the screen. Add an Anthropic API key in the menu bar."
         }

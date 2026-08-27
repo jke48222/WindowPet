@@ -11,7 +11,10 @@ enum AXPermission {
     static var trusted: Bool { AXIsProcessTrusted() }
 
     static func requestWithPrompt() {
-        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        // The C import exposes kAXTrustedCheckOptionPrompt as a mutable
+        // global, which Swift 6 will not let us touch across isolation. Its
+        // value is this fixed string, so spell it out.
+        let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(opts)
     }
 }

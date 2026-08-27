@@ -4,6 +4,7 @@ import WindowPetCore
 /// One finish for Rusty and everything around him: the sprite set (drawn by
 /// PetGen with the matching palette) plus the chat panel and speech bubble
 /// tints. Picking a skin recolors the whole product in one move.
+@MainActor
 struct SkinTheme {
     let id: String
     let displayName: String
@@ -88,6 +89,7 @@ struct SkinTheme {
 
 /// User skins: plain JSON files in Application Support, picked up at launch
 /// and listed in the Skin menu next to the built-ins.
+@MainActor
 enum CustomSkins {
 
     static var folderURL: URL {

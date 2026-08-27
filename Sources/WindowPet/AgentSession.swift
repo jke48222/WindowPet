@@ -10,6 +10,12 @@ import WindowPetCore
 /// grammar uses, so quit, dangerous AppleScript, and admin still stop the loop
 /// and wait for a human Return (and the OS password on top, for admin). The
 /// loop cannot spend those on its own no matter what it decides.
+/// Main-actor isolated on purpose. Every caller is the UI, the mutable state
+/// here (`messages`, `memory`, `pending`, `iterations`) is a running
+/// conversation, and two turns interleaving would corrupt it. Isolation makes
+/// that structurally impossible rather than merely unlikely; the network wait
+/// inside `streamTurn` is an await, so the main thread is never blocked.
+@MainActor
 final class AgentSession {
 
     enum Step {
@@ -23,9 +29,10 @@ final class AgentSession {
     /// Answer text as it streams in, chunk by chunk.
     var onTextDelta: ((String) -> Void)?
 
-    private var messages: [[String: Any]] = []
-    private var iterations = 0
-    private var lastText = ""
+    /// The running conversation: message array, iteration budget, and the last
+    /// thing Rusty managed to say. The rules live in WindowPetCore so they can
+    /// be replayed in tests without a network.
+    private var conversation = AgentConversation()
 
     /// Where the loop stopped for a confirmation: the gated action, the tool
     /// call it belongs to, results already collected this turn, and the calls
@@ -43,14 +50,11 @@ final class AgentSession {
 
     func start(_ text: String, context: String,
                history: [(role: String, text: String)]) async -> Step {
-        messages = history.map {
-            ["role": $0.role == "assistant" ? "assistant" : "user", "content": $0.text]
-        }
+        conversation = AgentConversation(history: history)
         memory = PetMemoryStore.load()
         let block = memory.promptBlock
         let situation = block.isEmpty ? context : "\(context). \(block)"
-        messages.append(ClaudeAgent.userMessage(
-            "Current situation: \(situation)\n\nUser said: \(text)"))
+        conversation.ask(text, situation: situation)
         // Keep a thread of the conversation across launches.
         memory.noteExchange("they said: \(text)")
         PetMemoryStore.save(memory)
@@ -80,10 +84,13 @@ final class AgentSession {
     // MARK: - The loop
 
     private func runLoop() async -> Step {
-        while iterations < ClaudeAgent.maxIterations {
-            iterations += 1
+        while conversation.beginIteration() {
+            // Checked per iteration, not per turn: a loop that keeps deciding
+            // to call one more tool is exactly the thing a daily ceiling is
+            // for, and it should stop at the ceiling rather than past it.
+            if let blocked = UsageMeter.shared.blockedMessage { return .failed(blocked) }
             guard let key = ClaudeRouter.apiKey,
-                  let spec = ClaudeAgent.agentRequest(messages: messages, apiKey: key,
+                  let spec = ClaudeAgent.agentRequest(messages: conversation.messages, apiKey: key,
                                                       model: ClaudeRouter.model,
                                                       stream: true) else {
                 return .failed("The Claude brain is not configured.")
@@ -96,41 +103,30 @@ final class AgentSession {
             } catch {
                 return .failed("I couldn't reach Anthropic: \(error.localizedDescription)")
             }
+            if case .turn(let turn) = result { conversation.record(turn) }
 
-            switch result {
-            case .refused:
-                return .done("That one is outside what I can help with.")
-            case .failed(let message):
-                return .failed("Claude call failed: \(message)")
-            case .turn(let turn):
-                if !turn.text.isEmpty { lastText = turn.text }
-                messages.append(ClaudeAgent.assistantEcho(turn.rawContent))
-                // A server-side tool (web search or fetch) hit its own
-                // iteration limit mid-turn. Re-send the conversation as it
-                // stands, with no tool_result, and the server picks up where
-                // it paused. The iteration cap still bounds this.
-                if turn.stopReason == "pause_turn" {
-                    onProgress?("Still reading…")
-                    continue
-                }
-                if turn.calls.isEmpty {
-                    let answer = AssistantRouting.sanitizeReply(
-                        turn.text.isEmpty ? lastText : turn.text,
-                        limit: ClaudeRouting.answerLimit)
-                    memory.noteExchange("you replied: \(answer)")
-                    PetMemoryStore.save(memory)
-                    return .done(answer)
-                }
-                if let paused = await processCalls(turn.calls, collected: []) {
+            switch AgentLoop.decide(result, lastText: conversation.lastText) {
+            case .stop(let message):
+                return .failed(message)
+            case .answer(let answer):
+                memory.noteExchange("you replied: \(answer)")
+                PetMemoryStore.save(memory)
+                return .done(answer)
+            case .resend:
+                // A server-side tool (web search or fetch) hit its own limit
+                // mid-turn. The conversation goes back unchanged, with no
+                // tool_result, and the server picks up where it paused. The
+                // iteration cap still bounds this.
+                onProgress?("Still reading…")
+                continue
+            case .execute(let calls):
+                if let paused = await processCalls(calls, collected: []) {
                     return paused
                 }
             }
         }
         // Hit the iteration cap: say so honestly instead of looping forever.
-        let tail = lastText.isEmpty
-            ? "I took several steps but couldn't finish that one."
-            : lastText
-        return .done(AssistantRouting.sanitizeReply(tail, limit: ClaudeRouting.answerLimit))
+        return .done(AgentLoop.exhaustedAnswer(lastText: conversation.lastText))
     }
 
     private enum AgentError: Error { case unauthorized }
@@ -242,7 +238,7 @@ final class AgentSession {
             onProgress?(result)
             results.append((id: call.id, text: result, isError: !ok))
         }
-        messages.append(ClaudeAgent.toolResultMessage(results))
+        conversation.record(results: results)
         return nil
     }
 }

@@ -51,6 +51,7 @@ enum FoundationRouter {
 /// Unified handling for anything typed into the command bar: exact grammar
 /// first (instant, free), Claude second when a key is configured (smartest),
 /// on-device LLM third, honest fallback last.
+@MainActor
 final class AssistantBrain {
 
     enum Outcome {
@@ -141,6 +142,10 @@ final class AssistantBrain {
                 return .unrecognized("Anthropic rejected the API key. Fix it under Anthropic API Key… in the menu bar.")
             } catch ClaudeRouter.RouterError.refused {
                 return .reply("That one's outside what I can help with.")
+            } catch ClaudeRouter.RouterError.overBudget(let message) {
+                // Say it rather than quietly dropping to the on-device tier:
+                // a ceiling nobody is told about looks like a broken app.
+                return .unrecognized(message)
             } catch {
                 // Network or transient API trouble: quietly fall through to
                 // the on-device tier so voice keeps working offline.

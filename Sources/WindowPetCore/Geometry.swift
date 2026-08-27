@@ -56,3 +56,58 @@ public enum Geometry {
         return CGPoint(x: x.rounded(), y: (ak.maxY - footOverlap).rounded())
     }
 }
+
+/// Which display a piece of UI belongs on, expressed as pure math over a list
+/// of screen frames so it can be tested without a window server.
+///
+/// AppKit's `NSScreen.main` is "the screen with the key window", which on a
+/// multi-display Mac is regularly not the screen the person is looking at. It
+/// is only ever the last resort here.
+public enum DisplayChoice {
+
+    /// Index of the frame containing `point`, if any.
+    public static func index(containing point: CGPoint, in frames: [CGRect]) -> Int? {
+        frames.firstIndex { $0.contains(point) }
+    }
+
+    /// Index of the display a piece of UI belongs on. Preference order: the
+    /// display holding `preferred` (a pinned panel origin, the pet's feet),
+    /// then the display under the pointer, then `fallback` (the key screen),
+    /// then the primary. Returns nil only when there are no displays at all.
+    public static func index(preferred: CGPoint?, mouse: CGPoint, fallback: Int?,
+                             in frames: [CGRect]) -> Int? {
+        if frames.isEmpty { return nil }
+        if let preferred, let hit = index(containing: preferred, in: frames) { return hit }
+        if let hit = index(containing: mouse, in: frames) { return hit }
+        if let fallback, frames.indices.contains(fallback) { return fallback }
+        return 0
+    }
+
+    /// Index of the display a window occupies. A window can straddle two
+    /// displays, so the winner is the one covering the most of it, which is
+    /// the rule macOS itself uses for deciding where a window "is".
+    public static func index(overlapping rect: CGRect, in frames: [CGRect]) -> Int? {
+        var best: (index: Int, area: CGFloat)?
+        for (index, frame) in frames.enumerated() {
+            let overlap = frame.intersection(rect)
+            guard !overlap.isNull, overlap.width > 0, overlap.height > 0 else { continue }
+            let area = overlap.width * overlap.height
+            if area > (best?.area ?? 0) { best = (index, area) }
+        }
+        return best?.index
+    }
+
+    /// Clamps a panel of `size` fully inside `frame`, keeping `inset` of
+    /// breathing room. This is what brings a panel back when the display it
+    /// was dragged onto is unplugged: without it the origin still points into
+    /// coordinates no display covers any more.
+    public static func clamp(origin: CGPoint, size: CGSize, into frame: CGRect,
+                             inset: CGFloat) -> CGPoint {
+        // A panel larger than the display pins to the near corner rather than
+        // inverting the clamp and landing off the far edge.
+        let maxX = max(frame.minX + inset, frame.maxX - inset - size.width)
+        let maxY = max(frame.minY + inset, frame.maxY - inset - size.height)
+        return CGPoint(x: min(max(origin.x, frame.minX + inset), maxX),
+                       y: min(max(origin.y, frame.minY + inset), maxY))
+    }
+}

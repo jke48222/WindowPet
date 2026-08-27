@@ -147,9 +147,13 @@ Three properties make this hold up:
    in front of the user. There is no stored credential and no standing privileged helper. A
    privileged command therefore needs two human checkpoints: the panel confirmation, then the OS
    password prompt.
-3. **It is tested.** 24 tests on the routing layer and 11 on the agent loop, plus end to end checks
-   in the rig asserting that quit, admin and destructive scripts are gated while a harmless script
-   is not.
+3. **It is tested.** 24 tests on the routing layer and 30 on the agent loop, including replays of
+   whole multi-turn conversations from canned API responses, plus end to end checks in the rig
+   asserting that quit, admin and destructive scripts are gated while a harmless script is not.
+4. **There is a spending ceiling.** [`BudgetPolicy.swift`](Sources/WindowPetCore/BudgetPolicy.swift)
+   is checked before every model call, including each iteration of the loop, so a plan that keeps
+   deciding on one more step stops at the ceiling rather than past it. It defaults to $5 a day and
+   is set under Daily Spend Limit in the menu bar.
 
 ## What it never reads, stated precisely
 
@@ -177,12 +181,12 @@ Every number below has a file or a command behind it.
 
 | Result | Value | How it was measured |
 | --- | --- | --- |
-| Unit tests | **131 passing, 0 failures**, across 15 files | `swift test`, run 2026-08-27 |
+| Unit tests | **195 passing, 0 failures**, across 18 files | `swift test`, run 2026-08-27 |
 | End to end rig | **93 of 93**, seven parts | `--testrig`, run 2026-08-27, caveat below |
 | Idle CPU | **0.24%** of one core, 47.7 MB | [`ENERGY.md`](ENERGY.md), M5 Pro, release build |
 | Perched CPU | **0.42%**, 47.6 MB | Same run |
 | Active CPU | **1.04%**, 48.5 MB | Same run |
-| Source size | 12,561 lines, 66 files | Sources 9,704, Tests 1,475, Tools 1,354, Package.swift 28 |
+| Source size | 13,962 lines, 79 files | Sources 10,271, Tests 2,136, Tools 1,515, Package.swift 40 |
 | Dependencies | zero | `Package.swift` |
 
 ### The energy numbers, and how they were taken
@@ -250,9 +254,10 @@ and spawns helper processes that wiggle a titled window from another process so 
 observer sees genuine cross-process events, then asserts against the running creature.
 
 The total is a **runtime tally**, not something a static count of the source can settle: the rig
-increments once per named step that resolves plus each explicit check. Four runs on 2026-08-27 gave
-93 of 93 three times and 90 of 93 once, with all three failures in the planned-travel phase timing
-out on a loaded machine. **Treat 93 of 93 as the expected result and planner travel as the part
+increments once per named step that resolves plus each explicit check. Runs on 2026-08-27 gave
+93 of 93 repeatedly, with one 90 of 93 and one 86 of 93 while a background sync process was pinning
+a core; every one of those failures was in the planned-travel phase timing out. Removing the
+process restored 93 of 93. **Treat 93 of 93 as the expected result and planner travel as the part
 that is timing sensitive under load.** The rig is built to wait rather than assert against wall
 clock choreography, but that phase has the least slack.
 
@@ -276,14 +281,14 @@ Grant Accessibility from that same menu when you want event-driven tracking. The
 for it on its own, and everything works without it.
 
 ```bash
-swift test                          # 131 unit tests, headless, opens no windows
+swift test                          # 195 unit tests, headless, opens no windows
 swift run WindowPet -- --diag 6     # verbose tracking log for 6 seconds, then exits
 swift run WindowPet -- --testrig    # end to end check, opens its own windows, exits 0 or 1
 swift run WindowPet -- --bench 15   # energy benchmark, asserts budgets, exits 0 or 1
 swift run WindowPet -- --ask "..."  # headless: run one prompt through the agent and print
 ```
 
-A successful `swift test` ends with `Executed 131 tests, with 0 failures`. A successful rig run ends
+A successful `swift test` ends with `Executed 195 tests, with 0 failures`. A successful rig run ends
 with `RIG PASS 93/93` and exit code 0.
 
 Build a distributable app:
@@ -319,15 +324,22 @@ Sources/
 │   ├── Assistant.swift         The action verbs, and which ones require confirmation
 │   ├── ClaudeRouting.swift     Request build and response parse for the Messages API
 │   ├── ClaudeAgent.swift       The tool-use loop and its tool schemas
+│   ├── AgentLoop.swift         When to stop, resend or execute, plus the message array
 │   ├── StreamAccumulator.swift Rebuilding a turn from a server-sent event stream
 │   ├── PetMemory.swift         Durable facts and a conversation tail across launches
 │   ├── ShimejiActions.swift    Parsing third party sprite pack definitions
+│   ├── BudgetPolicy.swift      The daily spend ceiling, checked before every call
 │   └── SkinDefinition.swift    The user-authored JSON skin schema
 ├── WindowPet/              The AppKit application
 │   ├── Tier1.swift             Window list polling. Zero permissions
 │   ├── Tier2.swift             AXObserver event stream. Opt-in
 │   ├── WorldModel.swift        Windows and screen floors to platforms
 │   ├── PetEngine.swift         The creature state machine, the largest file here
+│   ├── PetEngine+Behavior.swift  Turning a brain decision into a plan of steps
+│   ├── PetEngine+Reactions.swift Reactions, each derived from observable state
+│   ├── PetEngine+Mouse.swift     The click-through hole, grabbing and flinging
+│   ├── PetEngine+Debug.swift     The read-only surface the rig and --diag drive
+│   ├── Screens.swift           Which display a panel or a snapped window belongs on
 │   ├── OverlayStage.swift      Presentation, and the click-through hole
 │   ├── OverlayPanel.swift      The transparent non-activating all-Spaces panel
 │   ├── SpriteSet.swift         Animation frames and their per-frame alpha masks
@@ -346,7 +358,7 @@ Sources/
 │   └── App.swift               Delegate, mode parsing, status item
 └── PetGen/                 One-shot sprite generator
 
-Tests/WindowPetCoreTests/   131 tests, all against the pure core
+Tests/WindowPetCoreTests/   195 tests, all against the pure core
 Tools/                      Character design sheets, app and DMG packaging, energy benchmark
 ENERGY.md                   Generated by Tools/energy-bench.sh
 ```
@@ -396,6 +408,9 @@ one is present, so this is an enrollment problem rather than a code problem.
 - **No screen recording or demo clip exists**, which for a project whose entire pitch is visual is
   the single most valuable missing asset.
 - **Apple silicon only.** The build is thin arm64, not universal.
+- **Multi-display behavior is tested as policy, not on hardware.** The 13 tests in
+  [`DisplayChoiceTests.swift`](Tests/WindowPetCoreTests/DisplayChoiceTests.swift) cover the rules
+  for picking a display and clamping to it, but every run so far has been on one screen.
 
 ---
 

@@ -12,6 +12,7 @@ import WindowPetCore
 ///
 /// The engine stops only when: disabled, ⌥Space push-to-talk takes the mic,
 /// or the machine sleeps/locks. Watch sessions roll every ~45 s.
+@MainActor
 final class WakeWordListener: NSObject {
 
     private enum Mode { case watching, capturing }
@@ -42,16 +43,27 @@ final class WakeWordListener: NSObject {
 
     override init() {
         super.init()
+        // All four are main-queue observers, so assumeIsolated asserts the
+        // thread the block already runs on. The mic must stop the instant the
+        // machine sleeps or locks, which a hop would delay.
         let ws = NSWorkspace.shared.notificationCenter
         ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil,
-                       queue: .main) { [weak self] _ in self?.stopEngine() }
+                       queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stopEngine() }
+        }
         ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil,
-                       queue: .main) { [weak self] _ in self?.startIfEnabled() }
+                       queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.startIfEnabled() }
+        }
         let dnc = DistributedNotificationCenter.default()
         dnc.addObserver(forName: Notification.Name("com.apple.screenIsLocked"), object: nil,
-                        queue: .main) { [weak self] _ in self?.stopEngine() }
+                        queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stopEngine() }
+        }
         dnc.addObserver(forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil,
-                        queue: .main) { [weak self] _ in self?.startIfEnabled() }
+                        queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.startIfEnabled() }
+        }
     }
 
     func setEnabled(_ on: Bool) {

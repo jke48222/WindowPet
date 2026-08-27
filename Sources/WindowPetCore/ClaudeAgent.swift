@@ -102,10 +102,12 @@ public enum ClaudeAgent {
     /// response, so the loop never executes them and never returns a
     /// tool_result for them. They are what lets Rusty actually read the web
     /// instead of just opening a page for the user to read.
-    static let serverTools: [[String: Any]] = [
-        ["type": "web_search_20260209", "name": "web_search", "max_uses": 5],
-        ["type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 5],
-    ]
+    static var serverTools: [[String: Any]] {
+        [
+            ["type": "web_search_20260209", "name": "web_search", "max_uses": 5],
+            ["type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 5],
+        ]
+    }
 
     /// Tools Anthropic runs. The loop must never execute these or return a
     /// tool_result for them.

@@ -52,6 +52,7 @@ extension HotKeyBinding {
 
 /// A small panel that listens for the next shortcut the user presses and
 /// hands it back. Modal-ish: it takes key focus, Escape cancels.
+@MainActor
 final class HotKeyRecorder: NSObject {
 
     private var panel: NSPanel!
@@ -107,9 +108,10 @@ final class HotKeyRecorder: NSObject {
         container.addSubview(hint)
 
         panel.contentView = container
-        if let screen = NSScreen.main?.visibleFrame {
-            panel.setFrameOrigin(CGPoint(x: screen.midX - 170, y: screen.midY - 60))
-        }
+        // Appears on the display the pointer is on, so a key-capture prompt
+        // never opens behind the person on another monitor.
+        let screen = Screens.visibleFrame()
+        panel.setFrameOrigin(CGPoint(x: screen.midX - 170, y: screen.midY - 60))
         self.panel = panel
         panel.orderFrontRegardless()
         NSApp.activate()

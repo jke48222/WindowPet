@@ -6,6 +6,7 @@ import WindowPetCore
 /// the pet already holds (same capability as Voice Control); everything else
 /// is ordinary NSWorkspace/AppleScript/Shortcuts plumbing. Returns a short
 /// human line for the command bar.
+@MainActor
 enum AssistantExecutor {
 
     static func execute(_ action: AssistantAction) -> String {
@@ -165,8 +166,29 @@ enum AssistantExecutor {
             return "\(front.localizedName ?? "That app") isn't showing me a window I can move."
         }
         let win = winRefUnwrapped as! AXUIElement
-        guard let screen = NSScreen.main else { return "No screen found." }
-        let v = screen.visibleFrame
+
+        // Read the current frame first: it decides both which display to snap
+        // within and where the glide starts from.
+        var startPos = CGPoint.zero
+        var startSize = CGSize(width: 800, height: 600)
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        var knowsFrame = false
+        if AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &posRef) == .success,
+           let pv = posRef, CFGetTypeID(pv) == AXValueGetTypeID() {
+            AXValueGetValue(pv as! AXValue, .cgPoint, &startPos)
+            knowsFrame = true
+        }
+        if AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &sizeRef) == .success,
+           let sv = sizeRef, CFGetTypeID(sv) == AXValueGetTypeID() {
+            AXValueGetValue(sv as! AXValue, .cgSize, &startSize)
+        }
+
+        // Snap inside the display the window is already on. Using the main
+        // display here would teleport a window across a two-display setup.
+        let v = knowsFrame
+            ? Screens.visibleFrame(forAXPosition: startPos, size: startSize)
+            : Screens.visibleFrame()
         let ak: CGRect
         switch move {
         case .left: ak = CGRect(x: v.minX, y: v.minY, width: v.width / 2, height: v.height)
@@ -175,22 +197,13 @@ enum AssistantExecutor {
         case .center: ak = CGRect(x: v.midX - v.width * 0.35, y: v.midY - v.height * 0.4,
                                   width: v.width * 0.7, height: v.height * 0.8)
         }
-        let primaryH = NSScreen.screens.first?.frame.height ?? 982
-        let targetPos = CGPoint(x: ak.minX, y: primaryH - ak.maxY) // AppKit → AX top-left
+        let targetPos = CGPoint(x: ak.minX, y: Screens.primaryHeight - ak.maxY) // AppKit → AX top-left
         let targetSize = CGSize(width: ak.width, height: ak.height)
-
-        // Read the current frame so the move can glide instead of teleport.
-        var startPos = targetPos
-        var startSize = targetSize
-        var posRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &posRef) == .success,
-           let pv = posRef, CFGetTypeID(pv) == AXValueGetTypeID() {
-            AXValueGetValue(pv as! AXValue, .cgPoint, &startPos)
-        }
-        if AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &sizeRef) == .success,
-           let sv = sizeRef, CFGetTypeID(sv) == AXValueGetTypeID() {
-            AXValueGetValue(sv as! AXValue, .cgSize, &startSize)
+        // Without a readable frame there is nothing to glide from, so start
+        // at the destination and let the move land in one step.
+        if !knowsFrame {
+            startPos = targetPos
+            startSize = targetSize
         }
 
         func setFrame(_ p: CGPoint, _ sz: CGSize) -> Bool {

@@ -7,11 +7,14 @@ import WindowPetCore
 /// mic indicator, zero idle cost. On-device recognition whenever the locale
 /// supports it. Permissions (Microphone + Speech Recognition) prompt on
 /// first use and every failure surfaces as a bubble-friendly message.
+@MainActor
 final class VoiceInput: NSObject, AVSpeechSynthesizerDelegate {
 
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
-                           didFinish utterance: AVSpeechUtterance) {
-        onSpeechFinished?()
+    // AVFoundation delivers this without an actor; hop before touching the
+    // main-actor callback the app installed.
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
+                                       didFinish utterance: AVSpeechUtterance) {
+        Task { @MainActor in self.onSpeechFinished?() }
     }
 
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
