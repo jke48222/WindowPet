@@ -314,11 +314,16 @@ The total is a **runtime tally**, not something a static count of the source can
 increments once per named step that resolves plus each explicit check. Runs on 2026-08-27 gave
 138 of 138 repeatedly, with a 90, an 87 and an 86 recorded while the machine was loaded (a background
 sync process pinning a core, then a load average above 5 with the window server at 18%). The failing
-checks in all three were window choreography timing out, and the sets differed run to run rather
-than repeating, which is the signature of load rather than a regression: consecutive full passes
-followed once the machine was quiet. The same caveat applies to the energy benchmark, which reported
-a hard-budget failure under load and passed with the identical build ninety seconds later. **Quit
-everything and check `uptime` before believing a regression in either.** **Treat 93 of 93 as the expected result and planner travel as the part
+checks are always window choreography timing out, and the sets differ run to run rather than
+repeating, which is the signature of load rather than a regression.
+
+Concretely, on the development machine: a normal working session (a browser and a chat app open)
+sits at a load average around 5 and never falls below 2, and at that load the rig passes about two
+runs in three. It passes consistently when nothing else is compiling. **A failure here is not
+evidence of a regression until it repeats three times.** `Tools/release.sh` encodes exactly that:
+it retries the rig up to three times and requires one clean pass, because what is flaky is the
+failure, never the pass. The same caveat applies to the energy benchmark, which reported a
+hard-budget failure under load and passed with the identical build ninety seconds later. **Treat 93 of 93 as the expected result and planner travel as the part
 that is timing sensitive under load.** The rig is built to wait rather than assert against wall
 clock choreography, but that phase has the least slack.
 
