@@ -46,6 +46,17 @@ public enum AssistantAction: Equatable {
     /// server is a decision written down rather than one the model can take.
     case mcpCall(server: String, tool: String, arguments: String, trusted: Bool)
 
+    // Putting things back, standing asks, and learned routines.
+    case undoArrangement
+    case schedule(String)
+    case listSchedules
+    case unschedule(String)
+    case startRecordingTrick
+    case saveTrick(String)
+    case runTrick(String)
+    case listTricks
+    case forgetTrick(String)
+
     public var needsConfirmation: Bool {
         switch self {
         case .quitApp: return true
@@ -87,6 +98,8 @@ public enum AssistantRouting {
         "run_applescript", "run_admin", "look", "remember", "forget", "shortcut",
         "windows", "place_windows", "save_layout", "layout", "layouts",
         "watch", "watches", "unwatch", "clips", "recall_clip", "read_file",
+        "undo_arrangement", "schedule", "schedules", "unschedule",
+        "record_trick", "save_trick", "trick", "tricks", "forget_trick",
     ]
     // "look" is a Claude-only capability (it needs vision), so it's a valid
     // schema verb but has no AssistantAction: the brain intercepts it and
@@ -162,6 +175,15 @@ public enum AssistantRouting {
         case "clips": return .listClips
         case "recall_clip": return .recallClip(arg)
         case "read_file": return arg.isEmpty ? nil : .readFile(arg)
+        case "undo_arrangement": return .undoArrangement
+        case "schedule": return arg.isEmpty ? nil : .schedule(arg)
+        case "schedules": return .listSchedules
+        case "unschedule": return arg.isEmpty ? nil : .unschedule(arg)
+        case "record_trick": return .startRecordingTrick
+        case "save_trick": return arg.isEmpty ? nil : .saveTrick(arg)
+        case "trick": return arg.isEmpty ? nil : .runTrick(arg)
+        case "tricks": return .listTricks
+        case "forget_trick": return arg.isEmpty ? nil : .forgetTrick(arg)
         default: return nil
         }
     }

@@ -131,6 +131,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                  (self?.engine.isSleeping ?? false) ? " (sleeping)" : ""))
                 }
                 for line in self?.engine.tier2.summaryLines ?? [] { print("diag: tier2 — \(line)") }
+                print("diag: summon = \(HotKeyStore.current.displayName), "
+                      + "dictation = \(HotKeyStore.dictation.displayName)")
+                print("diag: quiet hours = \(self?.quietHours?.isEnabled == false ? "off" : "on")"
+                      + ", focus \(QuietHours.focusIsOn ? "on" : "off")"
+                      + ", mic \(QuietHours.microphoneInUseElsewhere ? "in use elsewhere" : "free")")
+                let services = AssistantExecutor.shared
+                print("diag: standing asks = \(services.schedules.entries.count), "
+                      + "tricks = \(TrickStore.load().count), "
+                      + "layouts = \(LayoutStore.load().count), "
+                      + "clips = \(services.clipboard.clips.count)")
                 print("diag: done")
                 exit(0)
             }
@@ -265,10 +275,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Long-lived services. The watch registry keeps ticking between
         // turns, which is the point of it, and speaks through the panel when
         // something it promised to notice happens.
+        // Anything Rusty says unprompted goes through the quiet gate first,
+        // so a watch firing never talks over a call.
+        let quiet = QuietHours()
+        quiet.speakingProvider = { [weak self] in self?.voice?.willSpeak ?? false }
+        quiet.suspendedProvider = { [weak self] in self?.engine.stateName == "suspended" }
+        quiet.immersionProvider = { [weak self] in self?.engine.immersionActive ?? false }
+        quiet.onRelease = { [weak self] message in self?.announce(message, spoken: true) }
+        quietHours = quiet
+
         AssistantExecutor.shared.watches.onFire = { [weak self] message in
-            self?.commandBar?.announce(message)
+            self?.announce(message, spoken: true)
+        }
+        // A live watch sends him to stand on the window and lights his lamp,
+        // so the promise is visible rather than taken on faith.
+        AssistantExecutor.shared.watches.onWatchingChanged = { [weak self] pid in
+            guard let self else { return }
+            if let pid {
+                self.engine.standWatch(overPID: pid)
+            } else {
+                self.engine.endWatch()
+            }
+        }
+        // A standing ask runs the full agent when it comes due, and announces
+        // itself so an answer arriving unprompted is never mysterious.
+        AssistantExecutor.shared.schedules.onFire = { [weak self] entry in
+            self?.commandBar?.runScheduled(entry)
         }
         AssistantExecutor.shared.clipboard.start()
+
+        // Dictation: hold the second shortcut and speak into whatever app is
+        // in front. No model, no request, nothing leaves the machine.
+        if let voice {
+            let dictation = Dictation(voice: voice)
+            dictation.onStatus = { [weak self] text in self?.stage.say(text, for: 2.5) }
+            dictation.onProblem = { [weak self] message in
+                self?.commandBar?.systemNote(message)
+            }
+            self.dictation = dictation
+            bar.onDictateStart = { [weak self] in self?.dictation?.begin() }
+            bar.onDictateEnd = { [weak self] in self?.dictation?.end() }
+        }
 
         // A3: hold ⌥Space to talk; the live transcript streams into the
         // chat panel (dimmed until final).
@@ -402,6 +449,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clipboardHistoryItem = clipboardItem
         abilities.addItem(NSMenuItem(title: "Forget Copied Clips",
                                      action: #selector(clearClipboardHistory), keyEquivalent: ""))
+        abilities.addItem(.separator())
+        let quietItem = NSMenuItem(title: "Stay Quiet During Focus And Calls",
+                                   action: #selector(toggleQuietHours), keyEquivalent: "")
+        quietItem.state = (quietHours?.isEnabled ?? true) ? .on : .off
+        abilities.addItem(quietItem)
+        quietHoursItem = quietItem
+        abilities.addItem(NSMenuItem(title: "Dictation Shortcut…",
+                                     action: #selector(changeDictationHotKey), keyEquivalent: ""))
         abilities.addItem(.separator())
         let mcpStatus = NSMenuItem(title: mcpMenuTitle(), action: nil, keyEquivalent: "")
         mcpStatus.isEnabled = false
@@ -634,6 +689,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var clipboardHistoryItem: NSMenuItem?
     private var mcpItem: NSMenuItem?
+    private var quietHoursItem: NSMenuItem?
+    private var dictation: Dictation?
+    private var quietHours: QuietHours?
+
+    /// One door for everything Rusty says without being asked. It always
+    /// reaches the panel; whether it is spoken depends on the moment.
+    private func announce(_ text: String, spoken: Bool) {
+        guard let quiet = quietHours else {
+            commandBar?.announce(text)
+            return
+        }
+        let decision = quiet.offer(text)
+        commandBar?.announce(decision.show, speak: spoken && decision.speak != nil)
+    }
 
     private func mcpMenuTitle() -> String {
         let host = AssistantExecutor.shared.mcp
@@ -655,6 +724,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         commandBar?.systemNote(clipboard.isEnabled
             ? "I will remember what you copy while I am running. Nothing is written to disk, and anything shaped like a password or a key is skipped."
             : "Stopped remembering what you copy, and forgot what I had.")
+    }
+
+    @objc private func toggleQuietHours() {
+        let on = !(quietHours?.isEnabled ?? true)
+        UserDefaults.standard.set(on, forKey: "quietHours")
+        quietHoursItem?.state = on ? .on : .off
+        if !on { quietHours?.clear() }
+        commandBar?.systemNote(on
+            ? "I will hold anything I want to say while Focus is on, your microphone is in use, or the screen is locked, and say it when the moment passes."
+            : "I will speak up whenever I have something, Focus or not.")
+    }
+
+    @objc private func changeDictationHotKey() {
+        let recorder = HotKeyRecorder()
+        hotKeyRecorder = recorder
+        recorder.record(current: HotKeyStore.dictation) { [weak self] binding in
+            guard let self else { return }
+            self.hotKeyRecorder = nil
+            guard let binding else { return }
+            guard !HotKeyStore.collides(binding, with: .dictate) else {
+                self.commandBar?.systemNote("That is already the shortcut for summoning me. Pick a different one.")
+                return
+            }
+            HotKeyStore.save(binding, for: .dictate)
+            self.commandBar?.applyDictationHotKey(binding)
+            self.commandBar?.systemNote("Hold \(binding.displayName) and speak, and the words go into whatever app is in front. Nothing is sent anywhere and nothing is spent.")
+        }
     }
 
     @objc private func clearClipboardHistory() {

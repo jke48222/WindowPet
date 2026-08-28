@@ -101,6 +101,15 @@ public enum ClaudeAgent {
         "clips": "See what the user has copied recently, newest first. Argument: empty. Call this when they ask what they copied or want something back.",
         "recall_clip": "Put an earlier clip back on the clipboard. Argument: its number from the clips list, or words that appear in it.",
         "read_file": "Read a file or list a folder. Argument: the path. The user must confirm this one, so call it only when they clearly asked about a specific file. A file they dropped on you is already in the conversation; do not call this for it.",
+        "undo_arrangement": "Put the windows back where they were before you last moved them. Argument: empty. Call this whenever they say to undo, put it back, or revert the layout.",
+        "schedule": "Set a standing ask that runs later, on its own. Argument: the timing, a colon, then the request, like 'every weekday at 9: tell me what is on my calendar' or 'in 20 minutes: remind me about the oven'. Understands every day, every weekday, every weekend, a named day of the week, a bare time, and 'in N minutes or hours'.",
+        "schedules": "List the standing asks. Argument: empty.",
+        "unschedule": "Drop a standing ask. Argument: its number from the list, words from it, or 'everything'.",
+        "record_trick": "Start recording the things you do, so they can be replayed later under a name. Argument: empty. Call this when they ask you to learn, remember how to do, or record a routine.",
+        "save_trick": "Stop recording and save what you did under a name. Argument: the name.",
+        "trick": "Do a routine you learned earlier. Argument: its name. Each step still asks for confirmation if it would have the first time.",
+        "tricks": "List the routines you know. Argument: empty.",
+        "forget_trick": "Forget a routine. Argument: its name.",
     ]
 
     /// Tools the agent handles itself rather than routing to the executor.
@@ -182,6 +191,10 @@ public enum ClaudeAgent {
     or keys. Use what you already remember naturally, without announcing \
     that you are remembering, and call forget when they ask you to drop \
     something.
+
+    When a fact is only true inside one app, write it as "in Xcode: keep the \
+    left half" and it will only come back to you while that app is in front. \
+    A fact about the person generally stays unscoped.
 
     Voice: warm, a bit mechanical, no emoji, and never an em dash. When you \
     are done, reply in one or two short sentences for an action, or a full \

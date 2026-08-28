@@ -150,6 +150,30 @@ rather than in a chat box:
 - **He speaks MCP.** Servers declared in `mcp.json` are spawned at launch, and their tools join the
   same schema and the same confirmation gate as the built-in verbs. Abilities stop being a list
   somebody has to recompile.
+- **He can put the windows back.** An arrangement records where every window was first, at the size
+  it actually was, so "put it back" returns a deliberately odd window to its odd size rather than
+  tidying it into a half. Session-scoped on purpose: a frame from three days ago is stale, and
+  saying "nothing to undo" beats restoring a window to where it used to live.
+- **Dictation, with no model in the loop.** Hold Option-D and speak, and the words go from the
+  on-device recognizer straight into whatever app is in front. Nothing is sent anywhere and nothing
+  is spent. [`DictationPolicy`](Sources/WindowPetCore/DictationPolicy.swift) handles spoken
+  punctuation, including the part that is actually hard: "that period piece" is a length of time and
+  "world period" ends a sentence, so a determiner in front vetoes the substitution.
+- **Standing asks.** "Every weekday at 9: tell me what is on my calendar." He is already running all
+  day, so this needs no daemon and no server. A missed slot is not replayed: a laptop waking at 3pm
+  does not get every morning it slept through.
+- **He can learn a trick.** Record what he does, name it, ask for it later. What gets recorded is
+  what *Rusty* did, never your keystrokes, which is a deliberate limit: recording a person's typing
+  would need input monitoring, a permission this app has spent its whole design avoiding. Replay
+  goes back through the same gate, so a step that confirmed when it was recorded confirms again, and
+  `run_admin` is never recordable at all.
+- **He knows when to keep quiet.** Everything he says unprompted goes through
+  [`QuietPolicy`](Sources/WindowPetCore/QuietPolicy.swift) first. Focus on, microphone in use by
+  another app, or the screen locked, and the message is held rather than lost, then delivered with a
+  word about why it waited. Full screen or mid-sentence, and it appears in the panel without being
+  spoken. Anything older than two hours is dropped: a build that finished at lunchtime is not news.
+- **Memory can belong to one app.** "In Xcode: keep the left half" only comes back while Xcode is in
+  front. Facts about the person stay global.
 
 ## The safety gate
 
@@ -214,12 +238,12 @@ Every number below has a file or a command behind it.
 
 | Result | Value | How it was measured |
 | --- | --- | --- |
-| Unit tests | **294 passing, 0 failures**, across 21 files | `swift test`, run 2026-08-27 |
-| End to end rig | **115 of 115**, seven parts | `--testrig`, run 2026-08-27, caveat below |
+| Unit tests | **354 passing, 0 failures**, across 22 files | `swift test`, run 2026-08-27 |
+| End to end rig | **138 of 138**, seven parts | `--testrig`, run 2026-08-27, caveat below |
 | Idle CPU | **0.24%** of one core, 47.7 MB | [`ENERGY.md`](ENERGY.md), M5 Pro, release build |
 | Perched CPU | **0.42%**, 47.6 MB | Same run |
 | Active CPU | **1.04%**, 48.5 MB | Same run |
-| Source size | 16,919 lines, 96 files | Sources 12,368, Tests 2,893, Tools 1,618, Package.swift 40 |
+| Source size | 19,091 lines, 105 files | Sources 14,049, Tests 3,376, Tools 1,626, Package.swift 40 |
 | Dependencies | zero | `Package.swift` |
 
 ### The energy numbers, and how they were taken
@@ -288,7 +312,7 @@ observer sees genuine cross-process events, then asserts against the running cre
 
 The total is a **runtime tally**, not something a static count of the source can settle: the rig
 increments once per named step that resolves plus each explicit check. Runs on 2026-08-27 gave
-115 of 115 repeatedly, with a 90, an 87 and an 86 recorded while the machine was loaded (a background
+138 of 138 repeatedly, with a 90, an 87 and an 86 recorded while the machine was loaded (a background
 sync process pinning a core, then a load average above 5 with the window server at 18%). The failing
 checks in all three were window choreography timing out, and the sets differed run to run rather
 than repeating, which is the signature of load rather than a regression: consecutive full passes
@@ -318,14 +342,14 @@ Grant Accessibility from that same menu when you want event-driven tracking. The
 for it on its own, and everything works without it.
 
 ```bash
-swift test                          # 294 unit tests, headless, opens no windows
+swift test                          # 354 unit tests, headless, opens no windows
 swift run WindowPet -- --diag 6     # verbose tracking log for 6 seconds, then exits
 swift run WindowPet -- --testrig    # end to end check, opens its own windows, exits 0 or 1
 swift run WindowPet -- --bench 15   # energy benchmark, asserts budgets, exits 0 or 1
 swift run WindowPet -- --ask "..."  # headless: run one prompt through the agent and print
 ```
 
-A successful `swift test` ends with `Executed 294 tests, with 0 failures`. A successful rig run ends
+A successful `swift test` ends with `Executed 354 tests, with 0 failures`. A successful rig run ends
 with `RIG PASS 93/93` and exit code 0.
 
 Build a distributable app:
@@ -372,6 +396,11 @@ Sources/
 │   ├── ClipPolicy.swift        What the clipboard history keeps, and never keeps
 │   ├── FilePolicy.swift        What Rusty will read off disk, and how much
 │   ├── MCPProtocol.swift       Model Context Protocol client framing
+│   ├── DictationPolicy.swift   Spoken punctuation and casing, no model involved
+│   ├── SchedulePolicy.swift    Reading "every weekday at 9" and deciding when
+│   ├── QuietPolicy.swift       When not to speak, and what to do with it instead
+│   ├── Trick.swift             Learned routines and what may be recorded
+│   ├── ArrangementHistory.swift  Where windows were, so they can go back
 │   └── SkinDefinition.swift    The user-authored JSON skin schema
 ├── WindowPet/              The AppKit application
 │   ├── Tier1.swift             Window list polling. Zero permissions
@@ -389,6 +418,9 @@ Sources/
 │   ├── LayoutStore.swift       Named arrangements on disk
 │   ├── FileReader.swift        Text and PDF reading for drops and read_file
 │   ├── MCPHost.swift           Spawning MCP servers and speaking JSON-RPC to them
+│   ├── Dictation.swift         Hold a key, speak into the app in front
+│   ├── QuietHours.swift        Reading Focus and the microphone, holding announcements
+│   ├── ScheduleRunner.swift    Standing asks, and the trick store beside them
 │   ├── OverlayStage.swift      Presentation, and the click-through hole
 │   ├── OverlayPanel.swift      The transparent non-activating all-Spaces panel
 │   ├── SpriteSet.swift         Animation frames and their per-frame alpha masks
@@ -407,7 +439,7 @@ Sources/
 │   └── App.swift               Delegate, mode parsing, status item
 └── PetGen/                 One-shot sprite generator
 
-Tests/WindowPetCoreTests/   294 tests, all against the pure core
+Tests/WindowPetCoreTests/   354 tests, all against the pure core
 Tools/                      Character design sheets, app and DMG packaging, energy benchmark
 ENERGY.md                   Generated by Tools/energy-bench.sh
 ```
@@ -458,6 +490,13 @@ Fixed since 1.0.0:
 
 - **The wake word's energy cost is unmeasured**, for the reason given above. Granting the installed
   app Microphone and Speech Recognition permission and re-running the benchmark is the fix.
+- **Dictation is untested end to end**, for the same reason: it uses the same recognizer, and
+  `--diag` still reports `speech not asked yet, mic not asked yet`. The text handling is covered by
+  unit tests and the shortcut registers (`--diag` reports it), but nobody has spoken into it yet.
+- **The Focus reader is untested against a Focus mode that is actually on.** macOS has no public API
+  for it, so [`QuietHours`](Sources/WindowPet/QuietHours.swift) reads the database macOS keeps for
+  its own use and treats any failure as "not in Focus", because a watch that never fires is worse
+  than one that speaks during a Focus mode. `--diag` reports what it currently reads.
 - **The wake word note now survives a bench run.** It lives in
   [`Tools/energy-notes.md`](Tools/energy-notes.md) and `energy-bench.sh` appends it below the
   generated block, rather than sitting inside `ENERGY.md` where every run destroyed it.

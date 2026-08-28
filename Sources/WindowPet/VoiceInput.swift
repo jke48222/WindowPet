@@ -55,6 +55,37 @@ final class VoiceInput: NSObject, AVSpeechSynthesizerDelegate {
 
     /// autoStop: hands-free mode (wake word) — capture ends after ~1.6 s of
     /// silence following speech, or 6 s of hearing nothing at all.
+    /// Dictation borrows the same recognizer with its own callbacks, so the
+    /// panel's handlers are left alone and restored when the hold ends. One
+    /// audio engine, two purposes, no second microphone session.
+    func beginDictation(partial: @escaping (String) -> Void,
+                        final: @escaping (String) -> Void,
+                        problem: @escaping (String) -> Void) {
+        savedHandlers = (onPartial, onFinal, onState)
+        onPartial = partial
+        onFinal = { [weak self] text in
+            final(text)
+            self?.restoreHandlers()
+        }
+        onState = { state in
+            // "listening" is the engine coming up, not something to say.
+            if state != "listening" { problem(state) }
+        }
+        beginListening(autoStop: false)
+    }
+
+    private var savedHandlers: (partial: ((String) -> Void)?,
+                                final: ((String) -> Void)?,
+                                state: ((String) -> Void)?)?
+
+    private func restoreHandlers() {
+        guard let saved = savedHandlers else { return }
+        onPartial = saved.partial
+        onFinal = saved.final
+        onState = saved.state
+        savedHandlers = nil
+    }
+
     func beginListening(autoStop: Bool = false) {
         self.autoStop = autoStop
         SFSpeechRecognizer.requestAuthorization { [weak self] auth in

@@ -4,26 +4,74 @@ import WindowPetCore
 
 /// Where the summon shortcut lives between launches.
 enum HotKeyStore {
-    private static let codeKey = "hotKeyCode"
-    private static let modifiersKey = "hotKeyModifiers"
 
-    static var current: HotKeyBinding {
+    /// The app has two global shortcuts now, and they are stored the same way.
+    /// A slot keeps the defaults keys and the fallback binding together so
+    /// adding a third is one case rather than four scattered constants.
+    enum Slot {
+        /// Summons the chat panel.
+        case summon
+        /// Dictates into whatever app is in front, with no model involved.
+        case dictate
+
+        var codeKey: String {
+            switch self {
+            case .summon: return "hotKeyCode"
+            case .dictate: return "dictationHotKeyCode"
+            }
+        }
+
+        var modifiersKey: String {
+            switch self {
+            case .summon: return "hotKeyModifiers"
+            case .dictate: return "dictationHotKeyModifiers"
+            }
+        }
+
+        var fallback: HotKeyBinding {
+            switch self {
+            case .summon: return .default
+            // Option-D, next to the summon shortcut and not taken by macOS.
+            case .dictate:
+                return HotKeyBinding(keyCode: KeyCodes.byName["d"] ?? 2, modifiers: .option)
+            }
+        }
+
+        var displayName: String {
+            switch self {
+            case .summon: return "Summon Rusty"
+            case .dictate: return "Dictate Into The App In Front"
+            }
+        }
+    }
+
+    static func binding(_ slot: Slot) -> HotKeyBinding {
         let defaults = UserDefaults.standard
-        guard defaults.object(forKey: codeKey) != nil else { return .default }
+        guard defaults.object(forKey: slot.codeKey) != nil else { return slot.fallback }
         let binding = HotKeyBinding(
-            keyCode: UInt16(defaults.integer(forKey: codeKey)),
-            modifiers: HotKeyModifiers(rawValue: defaults.integer(forKey: modifiersKey)))
-        return binding.isValid ? binding : .default
+            keyCode: UInt16(defaults.integer(forKey: slot.codeKey)),
+            modifiers: HotKeyModifiers(rawValue: defaults.integer(forKey: slot.modifiersKey)))
+        return binding.isValid ? binding : slot.fallback
     }
 
-    static func save(_ binding: HotKeyBinding) {
-        UserDefaults.standard.set(Int(binding.keyCode), forKey: codeKey)
-        UserDefaults.standard.set(binding.modifiers.rawValue, forKey: modifiersKey)
+    static var current: HotKeyBinding { binding(.summon) }
+    static var dictation: HotKeyBinding { binding(.dictate) }
+
+    static func save(_ binding: HotKeyBinding, for slot: Slot = .summon) {
+        UserDefaults.standard.set(Int(binding.keyCode), forKey: slot.codeKey)
+        UserDefaults.standard.set(binding.modifiers.rawValue, forKey: slot.modifiersKey)
     }
 
-    static func reset() {
-        UserDefaults.standard.removeObject(forKey: codeKey)
-        UserDefaults.standard.removeObject(forKey: modifiersKey)
+    static func reset(_ slot: Slot = .summon) {
+        UserDefaults.standard.removeObject(forKey: slot.codeKey)
+        UserDefaults.standard.removeObject(forKey: slot.modifiersKey)
+    }
+
+    /// True when the two shortcuts would fight over the same keystroke.
+    static func collides(_ binding: HotKeyBinding, with slot: Slot) -> Bool {
+        let other: Slot = slot == .summon ? .dictate : .summon
+        let existing = Self.binding(other)
+        return existing.keyCode == binding.keyCode && existing.modifiers == binding.modifiers
     }
 }
 

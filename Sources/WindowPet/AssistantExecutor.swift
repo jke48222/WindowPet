@@ -20,6 +20,12 @@ enum AssistantExecutor {
         let watches = WatchRegistry()
         let clipboard = ClipboardHistory()
         let mcp = MCPHost()
+        let schedules = ScheduleRunner()
+        /// Where windows were before the last arrangement, so "put it back"
+        /// works.
+        var arrangements = ArrangementHistory()
+        /// Steps captured since "start recording", or nil when not recording.
+        var recording: [TrickStep]?
     }
 
     static let shared = Services()
@@ -28,11 +34,98 @@ enum AssistantExecutor {
         executeChecked(action).result
     }
 
+    /// The verb and argument a completed action came from, for the trick
+    /// recorder. Derived from the action rather than from the caller's raw
+    /// input, so a recording captures what actually ran.
+    private static func recordable(_ action: AssistantAction) -> (String, String)? {
+        switch action {
+        case .openApp(let name): return ("open", name)
+        case .switchApp(let name): return ("switch", name)
+        case .hideApp(let name): return ("hide", name)
+        case .windowMove(let move):
+            switch move {
+            case .left: return ("window_left", "")
+            case .right: return ("window_right", "")
+            case .maximize: return ("maximize", "")
+            case .center: return ("center", "")
+            }
+        case .volume(let op):
+            switch op {
+            case .up: return ("volume_up", "")
+            case .down: return ("volume_down", "")
+            case .mute: return ("mute", "")
+            case .unmute: return ("unmute", "")
+            }
+        case .media(let op):
+            switch op {
+            case .playpause: return ("play_pause", "")
+            case .next: return ("next", "")
+            case .previous: return ("previous", "")
+            }
+        case .search(let query): return ("search", query)
+        case .openURL(let url): return ("open_url", url.absoluteString)
+        case .typeText(let text): return ("type_text", text)
+        case .copyText(let text): return ("copy_text", text)
+        case .pressKeys(let combo): return ("press_keys", combo)
+        case .screenshot: return ("screenshot", "")
+        case .runShortcut(let name): return ("shortcut", name)
+        case .placeWindows(let placements):
+            return ("place_windows", placements.map(\.description).joined(separator: ", "))
+        case .applyLayout(let name): return ("layout", name)
+        // Everything else is either gated, a question whose answer only means
+        // something in the moment, or part of the recorder itself.
+        default: return nil
+        }
+    }
+
+    /// Runs a learned routine step by step. Each step goes back through the
+    /// ordinary verb mapping, so a step that needed a confirmation when it was
+    /// recorded still needs one now: a trick cannot launder a gated action
+    /// into an unattended one. A gated step stops the routine rather than
+    /// being skipped, so nothing runs out of order behind it.
+    private static func runTrick(_ trick: Trick) -> (result: String, ok: Bool) {
+        var done: [String] = []
+        for step in trick.steps {
+            guard let action = AssistantRouting.action(verb: step.verb, argument: step.argument) else {
+                return ("\(trick.name) has a step I no longer understand (\(step.description)), so I stopped there.", false)
+            }
+            if action.needsConfirmation {
+                let ran = done.isEmpty ? "" : " I did \(done.count) of them first."
+                return ("\(trick.name) reaches a step that needs your say-so (\(action.confirmationSummary ?? step.description)), so I stopped.\(ran) Ask me for that step directly and I will run it.", false)
+            }
+            let (result, ok) = executeChecked(action)
+            guard ok else {
+                return ("\(trick.name) stopped at \(step.description): \(result)", false)
+            }
+            done.append(step.description)
+        }
+        return ("Did \(trick.name): " + done.joined(separator: ", "), true)
+    }
+
+    /// Called for every action that actually ran, so a recording captures what
+    /// he did rather than what he was asked.
+    static func noteForRecording(_ verb: String, _ argument: String) {
+        guard shared.recording != nil else { return }
+        guard let appended = TrickPolicy.appending(TrickStep(verb: verb, argument: argument),
+                                                   to: shared.recording ?? []) else { return }
+        shared.recording = appended
+    }
+
     /// Same execution, but reports whether the target was actually found —
     /// the brain uses a miss ("open big brother on paramount plus" is not an
     /// app) as its cue to hand the utterance to a smarter tier instead of
     /// pretending something opened.
     static func executeChecked(_ action: AssistantAction) -> (result: String, ok: Bool) {
+        let outcome = perform(action)
+        // Only steps that actually worked join a recording. A trick made of
+        // things that failed would fail the same way every time it ran.
+        if outcome.ok, shared.recording != nil, let (verb, argument) = recordable(action) {
+            noteForRecording(verb, argument)
+        }
+        return outcome
+    }
+
+    private static func perform(_ action: AssistantAction) -> (result: String, ok: Bool) {
         switch action {
         case .openApp(let name):
             if openAppChecked(name) { return ("Opening \(name)…", true) }
@@ -100,6 +193,45 @@ enum AssistantExecutor {
             let decoded = (try? JSONSerialization.jsonObject(with: Data(arguments.utf8)))
                 as? [String: Any] ?? [:]
             return shared.mcp.callTool(server: server, tool: tool, arguments: decoded)
+
+        // MARK: putting things back, standing asks, learned routines
+
+        case .undoArrangement:
+            return (WindowArranger.undo(), true)
+
+        case .schedule(let raw):
+            let message = shared.schedules.add(raw)
+            return (message, message.hasPrefix("Set:"))
+        case .listSchedules:
+            return (shared.schedules.listing(), true)
+        case .unschedule(let raw):
+            return (shared.schedules.remove(matching: raw), true)
+
+        case .startRecordingTrick:
+            shared.recording = []
+            return (TrickPolicy.recordingStarted(), true)
+        case .saveTrick(let name):
+            guard let steps = shared.recording else {
+                return ("I am not recording anything right now. Ask me to start recording first.", false)
+            }
+            shared.recording = nil
+            let trick = Trick(name: name.trimmingCharacters(in: .whitespaces), steps: steps)
+            guard !trick.steps.isEmpty else {
+                return (TrickPolicy.recordingSaved(trick), false)
+            }
+            TrickStore.store(trick)
+            return (TrickPolicy.recordingSaved(trick), true)
+        case .runTrick(let name):
+            guard let trick = TrickStore.named(name) else {
+                return ("I don't know a trick called \(name).", false)
+            }
+            return runTrick(trick)
+        case .listTricks:
+            return (TrickPolicy.listing(TrickStore.load()), true)
+        case .forgetTrick(let name):
+            return TrickStore.remove(name)
+                ? ("Forgot \(name).", true)
+                : ("I don't know a trick called \(name).", false)
         case .volume(let op):
             switch op {
             case .up: runAppleScript("set volume output volume (min(100, (output volume of (get volume settings)) + 10))")
