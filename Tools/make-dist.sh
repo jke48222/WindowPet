@@ -20,16 +20,34 @@ NOTARIZE=0
 bash Tools/make-app.sh
 STAGE=build/dmg-stage
 DMG=build/WindowPet.dmg
+APP=build/WindowPet.app
 rm -rf "$STAGE" "$DMG"
+
+IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+  | grep -o '"Developer ID Application[^"]*"' | head -1 | tr -d '"' || true)
+
+# Staple the app BEFORE it goes into the DMG, not just the DMG around it.
+# A ticket on the disk image alone covers downloading and opening it, but the
+# moment somebody drags the app out to Applications it has no ticket of its
+# own, and macOS falls back to asking Apple over the network the first time it
+# runs. That works, until the person is on a plane. Two submissions, and the
+# app is self-sufficient afterwards.
+if [ "$NOTARIZE" = "1" ] && [ -n "$IDENTITY" ]; then
+  echo "Notarizing the app itself so it works offline once copied out"
+  ditto -c -k --keepParent "$APP" build/WindowPet-app.zip
+  xcrun notarytool submit build/WindowPet-app.zip --keychain-profile "windowpet" --wait
+  xcrun stapler staple "$APP"
+  xcrun stapler validate "$APP"
+  rm -f build/WindowPet-app.zip
+fi
+
 mkdir -p "$STAGE"
-cp -R build/WindowPet.app "$STAGE/"
+cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 hdiutil create -volname "WindowPet" -srcfolder "$STAGE" -ov -format UDZO \
   "$DMG" >/dev/null
 rm -rf "$STAGE"
 
-IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
-  | grep -o '"Developer ID Application[^"]*"' | head -1 | tr -d '"' || true)
 if [ -n "$IDENTITY" ]; then
   codesign --force --timestamp --sign "$IDENTITY" "$DMG"
   echo "Signed DMG: $IDENTITY"
