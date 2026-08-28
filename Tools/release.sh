@@ -64,26 +64,38 @@ else
   bad "unit tests failed; run 'swift test' to see it"
 fi
 
+# Build first, then run the rig against the binary that will actually ship.
+# Rigging whatever happens to be in /Applications would pass on a stale copy
+# and prove nothing about this release. Permissions follow the signing identity
+# and bundle id rather than the path, so a fresh build in build/ holds the same
+# Accessibility grant the installed one does.
+echo "Building the app the rig will test"
+if bash Tools/make-app.sh >/dev/null 2>&1; then
+  note "release build succeeded"
+else
+  bad "the release build failed; run 'bash Tools/make-app.sh' to see it"
+fi
+
 # The rig is the gate, not the load average. Its window choreography times out
 # on a busy machine, so a failure is not proof of a regression, but a pass is
 # proof of a working build. Retry a few times and require one clean run: what
 # is flaky here is the failure, never the pass.
-if [ -x /Applications/WindowPet.app/Contents/MacOS/WindowPet ]; then
+RIG=build/WindowPet.app/Contents/MacOS/WindowPet
+if [ -x "$RIG" ]; then
   RIG_PASSED=0
   for attempt in 1 2 3; do
-    if /Applications/WindowPet.app/Contents/MacOS/WindowPet --testrig >/dev/null 2>&1; then
-      note "end to end rig passed (attempt $attempt)"
+    if "$RIG" --testrig >/dev/null 2>&1; then
+      note "end to end rig passed on the shipping binary (attempt $attempt)"
       RIG_PASSED=1
       break
     fi
   done
   if [ "$RIG_PASSED" = "0" ]; then
     bad "the rig failed three times; that is a real regression, not machine load.
-        Run '/Applications/WindowPet.app/Contents/MacOS/WindowPet --testrig' to see it."
+        Run '$RIG --testrig' to see it."
   fi
 else
-  bad "no installed app to run the rig against. Run 'bash Tools/make-app.sh' and
-        copy build/WindowPet.app to /Applications first."
+  bad "no built app to run the rig against"
 fi
 
 # 5. Signing and notarization. These are the two only a person can set up.
