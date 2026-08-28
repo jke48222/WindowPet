@@ -13,6 +13,9 @@ final class WatchRegistry {
 
     /// Called when a watch resolves, with the sentence to say out loud.
     var onFire: ((String) -> Void)?
+    /// Told when the set of live watches becomes non-empty or empty, so the
+    /// creature can go stand on the watched window and light his lamp.
+    var onWatchingChanged: ((pid_t?) -> Void)?
 
     private var watches: [WatchPolicy.Watch] = []
     private var lastActivity: [Int: TimeInterval] = [:]
@@ -42,6 +45,7 @@ final class WatchRegistry {
         lastActivity[watch.id] = now
         fingerprints[watch.id] = fingerprint(forApp: name)
         startTickerIfNeeded()
+        onWatchingChanged?(running.processIdentifier)
         return WatchPolicy.acknowledgement(watch)
     }
 
@@ -59,17 +63,19 @@ final class WatchRegistry {
         let removed = watches.remove(at: index)
         lastActivity[removed.id] = nil
         fingerprints[removed.id] = nil
-        if watches.isEmpty { stopTicker() }
+        if watches.isEmpty { stopTicker(); onWatchingChanged?(nil) }
         return "Stopped watching \(removed.app)."
     }
 
     func listing() -> String { WatchPolicy.listing(watches) }
 
     func clear() {
+        let hadAny = !watches.isEmpty
         watches.removeAll()
         lastActivity.removeAll()
         fingerprints.removeAll()
         stopTicker()
+        if hadAny { onWatchingChanged?(nil) }
     }
 
     /// An Accessibility event about `pid` counts as activity for any watch on
@@ -129,7 +135,10 @@ final class WatchRegistry {
                 onFire?(message)
             }
         }
-        if watches.isEmpty { stopTicker() }
+        if watches.isEmpty {
+            stopTicker()
+            if !fired.isEmpty { onWatchingChanged?(nil) }
+        }
     }
 
     /// Position, size and count of the app's windows, as one comparable

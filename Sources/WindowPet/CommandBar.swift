@@ -54,6 +54,7 @@ final class CommandBar: NSObject, NSTextFieldDelegate {
     private var agent: AgentSession?
     private var lastRunWasVoice = false
     private var hotKeyRef: EventHotKeyRef?
+    private var dictationHotKeyRef: EventHotKeyRef?
     private var hideTimer: DispatchSourceTimer?
     private var collapsed = false
     private var pinnedOrigin: CGPoint?
@@ -227,7 +228,16 @@ final class CommandBar: NSObject, NSTextFieldDelegate {
         InstallEventHandler(GetApplicationEventTarget(), { _, event, userData in
             guard let userData, let event else { return noErr }
             let bar = Unmanaged<CommandBar>.fromOpaque(userData).takeUnretainedValue()
-            if GetEventKind(event) == UInt32(kEventHotKeyPressed) {
+            // Both shortcuts arrive through one handler, told apart by the id
+            // they were registered with.
+            var id = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject),
+                              EventParamType(typeEventHotKeyID), nil,
+                              MemoryLayout<EventHotKeyID>.size, nil, &id)
+            let pressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
+            if id.id == CommandBar.dictationHotKeyID {
+                pressed ? bar.onDictateStart?() : bar.onDictateEnd?()
+            } else if pressed {
                 bar.hotKeyDown()
             } else {
                 bar.hotKeyUp()
@@ -235,6 +245,26 @@ final class CommandBar: NSObject, NSTextFieldDelegate {
             return noErr
         }, 2, &eventTypes, selfPtr, nil)
         applyHotKey(HotKeyStore.current)
+        applyDictationHotKey(HotKeyStore.dictation)
+    }
+
+    static let summonHotKeyID: UInt32 = 1
+    static let dictationHotKeyID: UInt32 = 2
+
+    /// Held to dictate straight into the app in front. No model, no cost, and
+    /// the words never leave the machine.
+    var onDictateStart: (() -> Void)?
+    var onDictateEnd: (() -> Void)?
+
+    func applyDictationHotKey(_ binding: HotKeyBinding) {
+        if let existing = dictationHotKeyRef {
+            UnregisterEventHotKey(existing)
+            dictationHotKeyRef = nil
+        }
+        let hotKeyID = EventHotKeyID(signature: OSType(0x52535459) /* RSTY */,
+                                     id: Self.dictationHotKeyID)
+        RegisterEventHotKey(UInt32(binding.keyCode), binding.carbonModifiers, hotKeyID,
+                            GetApplicationEventTarget(), 0, &dictationHotKeyRef)
     }
 
     /// (Re)binds the summon shortcut. Safe to call whenever the user picks a
@@ -244,7 +274,8 @@ final class CommandBar: NSObject, NSTextFieldDelegate {
             UnregisterEventHotKey(existing)
             hotKeyRef = nil
         }
-        let hotKeyID = EventHotKeyID(signature: OSType(0x52535459) /* RSTY */, id: 1)
+        let hotKeyID = EventHotKeyID(signature: OSType(0x52535459) /* RSTY */,
+                                     id: Self.summonHotKeyID)
         RegisterEventHotKey(UInt32(binding.keyCode), binding.carbonModifiers, hotKeyID,
                             GetApplicationEventTarget(), 0, &hotKeyRef)
     }
@@ -446,16 +477,30 @@ final class CommandBar: NSObject, NSTextFieldDelegate {
         run(parts.joined(separator: "\n\n") + "\n\nWhat do you make of it?", fromVoice: false)
     }
 
-    /// Something Rusty says on his own, without being asked: a watch firing.
-    /// Spoken as well as shown, because the whole point of a watch is that the
-    /// user is looking at something else.
-    func announce(_ text: String) {
+    /// Something Rusty says on his own, without being asked: a watch firing, a
+    /// standing ask coming due. It always lands in the panel; `speak` is the
+    /// quiet policy's decision about whether to say it out loud, because the
+    /// user being busy is a reason not to interrupt, not a reason to lose the
+    /// message.
+    func announce(_ text: String, speak: Bool = true) {
         present()
         messages.append(Message(kind: .rusty, text: text))
         history.append((role: "assistant", text: text))
         rebuildRows()
-        onOutcome?(.reply(text), false)
+        if speak { onOutcome?(.reply(text), false) }
         scheduleHide(after: 10)
+    }
+
+    /// Runs a standing ask through the full agent, the same way a typed
+    /// request goes. The preamble is shown first so an answer appearing on its
+    /// own is never mysterious.
+    func runScheduled(_ entry: SchedulePolicy.Entry) {
+        if collapsed { setCollapsed(false) }
+        present()
+        messages.append(Message(kind: .system, text: SchedulePolicy.preamble(entry)))
+        messages.append(Message(kind: .user, text: entry.request))
+        rebuildRows()
+        run(entry.request, fromVoice: false)
     }
 
     /// Out-of-band notes (voice errors etc.) that should reach the user.

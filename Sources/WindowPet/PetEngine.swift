@@ -68,6 +68,20 @@ final class PetEngine: NSObject {
     /// dragging him by hand and the rig placing him deliberately, come through
     /// this one named door instead of the setter being opened to the app.
     func place(at point: CGPoint) { anchor = point }
+
+    /// Sends Rusty to stand on an app's window and show his watch lamp, so a
+    /// watch is something you can see rather than a promise you take on faith.
+    /// Best effort: if the app has no standable window right now he stays put
+    /// and only the lamp comes on.
+    func standWatch(overPID pid: pid_t) {
+        stage.setWatching(true)
+        guard let window = Tier1.topmostStandardWindow(ownedBy: pid) else { return }
+        debugTravel(to: window.id)
+    }
+
+    func endWatch() {
+        stage.setWatching(false)
+    }
     private(set) var currentPlatformPID: pid_t?
     var lastWindowFrame: CGRect?
     private(set) var debugTier2WakeCount = 0

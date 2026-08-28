@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import WindowPetCore
 
@@ -52,7 +53,8 @@ final class AgentSession {
                history: [(role: String, text: String)]) async -> Step {
         conversation = AgentConversation(history: history)
         memory = PetMemoryStore.load()
-        let block = memory.promptBlock
+        // Facts scoped to an app only come back while that app is in front.
+        let block = memory.promptBlock(inApp: NSWorkspace.shared.frontmostApplication?.localizedName)
         let situation = block.isEmpty ? context : "\(context). \(block)"
         conversation.ask(text, situation: situation)
         // Keep a thread of the conversation across launches.
@@ -194,9 +196,12 @@ final class AgentSession {
                 continue
             }
             if call.name == "remember" {
-                memory.remember(call.argument)
+                // "in Xcode: keep the left half" saves a fact that only
+                // surfaces while Xcode is in front.
+                let (scope, text) = PetMemory.splitScope(call.argument)
+                memory.remember(text, scope: scope)
                 PetMemoryStore.save(memory)
-                onProgress?("Noted: \(call.argument)")
+                onProgress?(scope.map { "Noted for \($0): \(text)" } ?? "Noted: \(text)")
                 results.append((id: call.id, text: "Saved.", isError: false))
                 continue
             }

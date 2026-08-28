@@ -31,8 +31,16 @@ final class OverlayStage {
         bubble.backgroundColor = SkinTheme.current.bubbleFill.cgColor
         bubble.borderColor = SkinTheme.current.accent.withAlphaComponent(0.16).cgColor
         bubbleTail.fillColor = bubble.backgroundColor
+        retintWatchLamp()
     }
     private let bubbleTail = CAShapeLayer()
+
+    /// A small lamp beside the sprite while a watch is live. Watching was
+    /// invisible until it fired, which made a promise you had to take on
+    /// faith; this is the promise made visible. Drawn rather than a sprite
+    /// frame, so it works on every skin including imported character packs.
+    private let watchLamp = CALayer()
+    private(set) var watchLampVisible = false
     private var bubbleHideAt: TimeInterval = 0
     private var bubbleTimer: DispatchSourceTimer?
     private(set) var bubbleVisible = false
@@ -173,6 +181,8 @@ final class OverlayStage {
             bubble.removeFromSuperlayer()
             views[idx].layer?.addSublayer(sprite)
             views[idx].layer?.addSublayer(bubble)
+            watchLamp.removeFromSuperlayer()
+            views[idx].layer?.addSublayer(watchLamp)
             CATransaction.commit()
             currentPanelIndex = idx
         }
@@ -183,7 +193,56 @@ final class OverlayStage {
         sprite.position = CGPoint(x: (center.x - origin.x).rounded(),
                                   y: (center.y - origin.y).rounded())
         if bubbleVisible { layoutBubble(spriteCenterLocal: sprite.position) }
+        if watchLampVisible { layoutWatchLamp(spriteCenterLocal: sprite.position) }
         CATransaction.commit()
+    }
+
+    // MARK: - The watch lamp
+
+    /// Shows or hides the little lamp that means "I am keeping an eye on
+    /// something". It sits at his shoulder and breathes, slowly, so it reads
+    /// as attention rather than an alert.
+    func setWatching(_ watching: Bool) {
+        guard watching != watchLampVisible else { return }
+        watchLampVisible = watching
+        if watching {
+            watchLamp.backgroundColor = SkinTheme.current.thinking.cgColor
+            watchLamp.cornerRadius = 4
+            watchLamp.bounds = CGRect(x: 0, y: 0, width: 8, height: 8)
+            watchLamp.shadowColor = SkinTheme.current.thinking.cgColor
+            watchLamp.shadowOpacity = 0.9
+            watchLamp.shadowRadius = 5
+            watchLamp.shadowOffset = .zero
+            if watchLamp.superlayer == nil {
+                views[currentPanelIndex].layer?.addSublayer(watchLamp)
+            }
+            watchLamp.isHidden = false
+            layoutWatchLamp(spriteCenterLocal: sprite.position)
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 0.35
+            pulse.toValue = 1.0
+            pulse.duration = 1.4
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            watchLamp.add(pulse, forKey: "watching")
+        } else {
+            watchLamp.removeAnimation(forKey: "watching")
+            watchLamp.isHidden = true
+        }
+    }
+
+    /// Retints the lamp when the skin changes, so it never keeps an old
+    /// palette's colour after a swap.
+    func retintWatchLamp() {
+        watchLamp.backgroundColor = SkinTheme.current.thinking.cgColor
+        watchLamp.shadowColor = SkinTheme.current.thinking.cgColor
+    }
+
+    private func layoutWatchLamp(spriteCenterLocal center: CGPoint) {
+        let half = PetEngine.petSize.width / 2
+        watchLamp.position = CGPoint(x: (center.x + half - 3).rounded(),
+                                     y: (center.y + PetEngine.petSize.height / 2 - 6).rounded())
     }
 
     // MARK: - Speech bubble

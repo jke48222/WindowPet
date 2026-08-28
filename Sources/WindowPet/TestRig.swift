@@ -682,6 +682,96 @@ final class TestRig {
         })
 
         step(action: {
+            // Standing asks survive a round trip through disk, and a firing
+            // slot is decided by the same policy the unit tests cover.
+            let runner = AssistantExecutor.shared.schedules
+            let existing = ScheduleStore.load()
+            let set = runner.add("every weekday at 9: rig probe request")
+            self.check("standing ask accepted", set.hasPrefix("Set:"))
+            self.check("standing ask is listed", runner.listing().contains("rig probe request"))
+            self.check("standing ask persists to disk",
+                       ScheduleStore.load().contains { $0.request == "rig probe request" })
+            self.check("nonsense standing ask refused",
+                       !runner.add("sometime maybe: do a thing").hasPrefix("Set:"))
+            self.check("standing ask can be dropped",
+                       runner.remove(matching: "rig probe").contains("Dropped"))
+            ScheduleStore.save(existing)  // leave the user's schedule untouched
+            self.check("rig restored real schedules",
+                       ScheduleStore.load().count == existing.count)
+        })
+
+        step(action: {
+            // A trick records only what actually ran, refuses to record the
+            // admin verb, and survives a round trip through disk.
+            let existing = TrickStore.load()
+            AssistantExecutor.shared.recording = []
+            _ = AssistantExecutor.executeChecked(.volume(.mute))
+            _ = AssistantExecutor.executeChecked(.volume(.unmute))
+            // Gated verbs are refused by the recorder, not silently kept.
+            AssistantExecutor.noteForRecording("run_admin", "whoami")
+            let steps = AssistantExecutor.shared.recording ?? []
+            self.check("recording captured the steps that ran", steps.count == 2)
+            self.check("recording refused the admin verb",
+                       !steps.contains { $0.verb == "run_admin" })
+            let saved = AssistantExecutor.executeChecked(.saveTrick("rig probe trick"))
+            self.check("trick saved", saved.ok)
+            self.check("trick persists to disk", TrickStore.named("rig probe trick") != nil)
+            let ran = AssistantExecutor.executeChecked(.runTrick("rig probe trick"))
+            self.check("trick replays its steps", ran.ok)
+            self.check("unknown trick is refused",
+                       !AssistantExecutor.executeChecked(.runTrick("no such trick")).ok)
+            TrickStore.save(existing)  // leave the user's tricks untouched
+            self.check("rig restored real tricks", TrickStore.load().count == existing.count)
+        })
+
+        step(action: {
+            // Undo puts a window back where it actually was, at the size it
+            // actually was, not at the nearest tidy slot.
+            AssistantExecutor.shared.arrangements = ArrangementHistory()
+            let nothing = AssistantExecutor.executeChecked(.undoArrangement)
+            self.check("undo with nothing to undo says so",
+                       nothing.result == ArrangementHistory.nothingToUndo())
+            let before = self.winA.frame
+            _ = AssistantExecutor.executeChecked(
+                .placeWindows([WindowPlacement(app: "WindowPet", slot: .left)]))
+            // Our own app is not arrangeable, so nothing moved and nothing was
+            // recorded: an arrangement that moved nothing must not become an
+            // undo step that silently does nothing.
+            self.check("an arrangement that moved nothing is not an undo step",
+                       !AssistantExecutor.shared.arrangements.canUndo)
+            self.check("the rig's window was left alone", self.winA.frame == before)
+        })
+
+        step(action: {
+            // The watch lamp is the promise made visible.
+            self.stage.setWatching(true)
+            self.check("watch lamp lights", self.stage.watchLampVisible)
+            self.stage.setWatching(false)
+            self.check("watch lamp goes out", !self.stage.watchLampVisible)
+        })
+
+        step(action: {
+            // Scoped memory reaches the prompt only in its own app.
+            let original = PetMemoryStore.load()
+            var probe = PetMemory()
+            probe.remember("rig probe global fact")
+            probe.remember("rig probe scoped fact", scope: "Finder")
+            PetMemoryStore.save(probe)
+            let reloaded = PetMemoryStore.load()
+            self.check("scope survives a write and read",
+                       reloaded.facts.contains { $0.scope == "Finder" })
+            self.check("scoped fact reaches the prompt in its app",
+                       reloaded.promptBlock(inApp: "Finder").contains("rig probe scoped"))
+            self.check("scoped fact stays out of other apps",
+                       !reloaded.promptBlock(inApp: "Safari").contains("rig probe scoped"))
+            self.check("global fact reaches every app",
+                       reloaded.promptBlock(inApp: "Safari").contains("rig probe global"))
+            PetMemoryStore.save(original)
+            self.check("rig restored real memory again",
+                       PetMemoryStore.load().facts.count == original.facts.count)
+        })
+
+        step(action: {
             // Reading a real file off disk, and refusing one that is not there.
             let url = FileManager.default.temporaryDirectory
                 .appendingPathComponent("rig-probe-\(UUID().uuidString).md")

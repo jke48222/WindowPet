@@ -12,9 +12,25 @@ public struct PetMemory: Codable, Equatable {
     public struct Fact: Codable, Equatable {
         public let text: String
         public let savedAt: Date
-        public init(text: String, savedAt: Date = Date()) {
+        /// The app this fact is about, when it is about one. "In Xcode I want
+        /// the left half" is true in Xcode and noise everywhere else, so a
+        /// scoped fact only reaches the model while that app is in front.
+        /// Optional, and absent in every memory file written before this
+        /// existed, so decoding stays backward compatible.
+        public let scope: String?
+
+        public init(text: String, savedAt: Date = Date(), scope: String? = nil) {
             self.text = text
             self.savedAt = savedAt
+            self.scope = scope
+        }
+
+        /// True when this fact belongs in the prompt for `app`. Unscoped facts
+        /// always do.
+        public func applies(inApp app: String?) -> Bool {
+            guard let scope, !scope.isEmpty else { return true }
+            guard let app, !app.isEmpty else { return false }
+            return PetMemory.normalize(scope) == PetMemory.normalize(app)
         }
     }
 
@@ -34,16 +50,21 @@ public struct PetMemory: Codable, Equatable {
     /// Adds a fact unless it is empty or already known. Near-duplicates are
     /// treated as the same fact so the list does not silt up with rewordings
     /// of "likes dark mode".
-    public mutating func remember(_ raw: String, now: Date = Date()) {
+    public mutating func remember(_ raw: String, now: Date = Date(), scope: String? = nil) {
         let text = String(raw.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "\n", with: " ")
             .prefix(Self.maxFactLength))
         guard text.count > 2 else { return }
         let key = Self.normalize(text)
-        if let existing = facts.firstIndex(where: { Self.normalize($0.text) == key }) {
-            facts[existing] = Fact(text: text, savedAt: now)  // refresh instead of duplicate
+        let cleanScope = scope?.trimmingCharacters(in: .whitespaces)
+        // The same words scoped to two different apps are two different facts,
+        // so identity is the text AND the scope.
+        if let existing = facts.firstIndex(where: {
+            Self.normalize($0.text) == key && Self.normalize($0.scope ?? "") == Self.normalize(cleanScope ?? "")
+        }) {
+            facts[existing] = Fact(text: text, savedAt: now, scope: cleanScope)  // refresh, not duplicate
         } else {
-            facts.append(Fact(text: text, savedAt: now))
+            facts.append(Fact(text: text, savedAt: now, scope: cleanScope))
         }
         if facts.count > Self.maxFacts {
             facts.removeFirst(facts.count - Self.maxFacts)  // oldest out first
@@ -75,16 +96,48 @@ public struct PetMemory: Codable, Equatable {
 
     /// The block handed to the model as context. Empty when there is nothing
     /// worth saying, so a fresh install sends no noise.
-    public var promptBlock: String {
+    ///
+    /// `app` is whatever is in front right now. Facts scoped to a different
+    /// app are left out: they would be noise at best and wrong at worst.
+    public func promptBlock(inApp app: String? = nil) -> String {
         var parts: [String] = []
-        if !facts.isEmpty {
+        let general = facts.filter { $0.scope == nil || $0.scope?.isEmpty == true }
+        let here = facts.filter { $0.scope?.isEmpty == false && $0.applies(inApp: app) }
+        if !general.isEmpty {
             parts.append("What you remember about this person: "
-                + facts.map(\.text).joined(separator: "; "))
+                + general.map(\.text).joined(separator: "; "))
+        }
+        if !here.isEmpty, let app {
+            parts.append("What you remember about how they work in \(app): "
+                + here.map(\.text).joined(separator: "; "))
         }
         if !recent.isEmpty {
             parts.append("Earlier in your conversations: " + recent.joined(separator: " / "))
         }
         return parts.joined(separator: ". ")
+    }
+
+    /// Kept so existing callers and tests that want everything unscoped still
+    /// read naturally.
+    public var promptBlock: String { promptBlock(inApp: nil) }
+
+    /// Splits "in Xcode: keep the left half" into a scope and a fact. The
+    /// model is told to write facts this way when they are app-specific, and
+    /// anything without the prefix stays global.
+    public static func splitScope(_ raw: String) -> (scope: String?, text: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowered = trimmed.lowercased()
+        for prefix in ["in ", "for ", "when in ", "while in "] where lowered.hasPrefix(prefix) {
+            let rest = trimmed.dropFirst(prefix.count)
+            // The scope ends at the first colon; without one there is no way
+            // to tell an app name from the rest of the sentence.
+            guard let colon = rest.firstIndex(of: ":") else { continue }
+            let scope = rest[rest.startIndex..<colon].trimmingCharacters(in: .whitespaces)
+            let text = rest[rest.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            guard !scope.isEmpty, scope.count <= 60, !text.isEmpty else { continue }
+            return (scope, text)
+        }
+        return (nil, trimmed)
     }
 
     public static func normalize(_ text: String) -> String { TextNormalize.tokens(text) }

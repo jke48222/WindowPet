@@ -104,12 +104,18 @@ enum WindowArranger {
     /// Applies a set of placements, reporting what actually moved. Every
     /// failure is named: a layout that half worked and said "done" would be
     /// worse than one that failed loudly.
+    ///
+    /// Where each window was is recorded first, so "put it back" works. The
+    /// frames are stored rather than the slots they were nearest to: a window
+    /// deliberately left at an odd size returns to that odd size instead of
+    /// being tidied into a half on the way home.
     static func apply(_ placements: [WindowPlacement]) -> String {
         guard AXPermission.trusted else {
             return "I need Accessibility to arrange windows. System Settings, Privacy and Security, Accessibility, enable WindowPet."
         }
         var moved: [String] = []
         var missed: [String] = []
+        var before: [RememberedFrame] = []
         for placement in placements {
             guard let app = AssistantExecutor.runningApp(named: placement.app) else {
                 missed.append("\(placement.app) is not running")
@@ -125,16 +131,58 @@ enum WindowArranger {
                 .map { Screens.visibleFrame(forAXPosition: $0.origin, size: $0.size) }
                 ?? Screens.visibleFrame()
             let target = placement.slot.rect(in: visible)
+            let previous = currentFrame(of: window)
             if setFrame(window, to: target) {
                 moved.append("\(app.localizedName ?? placement.app) \(placement.slot.displayName)")
+                if let previous {
+                    before.append(RememberedFrame(app: app.localizedName ?? placement.app,
+                                                  frame: previous))
+                }
             } else {
                 missed.append("\(placement.app) would not move")
             }
         }
+        AssistantExecutor.shared.arrangements.record(before)
         var parts: [String] = []
         if !moved.isEmpty { parts.append("Placed " + moved.joined(separator: ", ") + ".") }
         if !missed.isEmpty { parts.append("Couldn't: " + missed.joined(separator: "; ") + ".") }
         return parts.isEmpty ? "Nothing to place." : parts.joined(separator: " ")
+    }
+
+    /// Puts the windows back where the last arrangement found them.
+    static func undo() -> String {
+        guard AXPermission.trusted else {
+            return "I need Accessibility to move windows. System Settings, Privacy and Security, Accessibility, enable WindowPet."
+        }
+        guard let frames = AssistantExecutor.shared.arrangements.popLast() else {
+            return ArrangementHistory.nothingToUndo()
+        }
+        var restored: [RememberedFrame] = []
+        var failed: [String] = []
+        for remembered in frames {
+            guard let app = AssistantExecutor.runningApp(named: remembered.app),
+                  let window = focusedWindow(ofPID: app.processIdentifier) else {
+                // The app quit or closed the window since. Nothing to put back,
+                // and saying so is better than silently doing less.
+                failed.append(remembered.app)
+                continue
+            }
+            if setFrame(window, to: appKitRect(fromAX: remembered.frame)) {
+                restored.append(remembered)
+            } else {
+                failed.append(remembered.app)
+            }
+        }
+        return ArrangementHistory.undone(restored, failed: failed)
+    }
+
+    /// `setFrame` takes AppKit coordinates and flips them on the way out, so a
+    /// frame that was read in Accessibility coordinates has to be flipped back
+    /// before it goes through. Doing this once here is what keeps the flip
+    /// from being applied zero times or twice.
+    private static func appKitRect(fromAX rect: CGRect) -> CGRect {
+        CGRect(x: rect.minX, y: Screens.primaryHeight - rect.minY - rect.height,
+               width: rect.width, height: rect.height)
     }
 
     /// A window's current frame in Accessibility coordinates.
