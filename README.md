@@ -465,24 +465,23 @@ pack can be imported and hot swapped while the creature is running: their art, t
 
 ## Status
 
-Built, running, and packaged locally as a universal app bundle and a drag-to-Applications DMG (3.0 MB).
-`codesign --verify --deep --strict` passes. It is **not ready to hand to anyone else**, and the
-reasons are specific.
+[v1.2.0](https://github.com/jke48222/WindowPet/releases/tag/v1.2.0) is a universal app bundle in a
+drag-to-Applications DMG (3.5 MB) that anyone can download and open without a Gatekeeper warning.
+It is signed with `Developer ID Application: Jalen Edusei (PK389W6V96)`, notarized by Apple, and
+stapled. The published DMG was downloaded and checked the way a stranger's Mac would:
 
-**Distribution. One thing is left, and it is not code.**
+```
+WindowPet.dmg: accepted
+source=Notarized Developer ID
+```
 
-- **The signature is a development certificate, not a distribution one.** The app is signed
-  `Apple Development: j.edusei@icloud.com`, team `PK389W6V96`. Distribution requires a
-  Developer ID Application certificate, which requires Apple Developer Program enrollment.
-  Everything downstream of that is already wired. `bash Tools/release.sh <version>` runs the whole
-  preflight (version matches the tag, release notes exist, tree is clean, tests pass, machine is
-  quiet enough for the rig to mean anything, certificate present, notary credentials stored) and
-  refuses to build or publish anything until every one of them passes. Adding `--publish` notarizes,
-  staples, tags and publishes the GitHub release.
-- **It is not notarized**, and cannot be until the certificate above exists. `spctl` currently
-  rejects both the app and the DMG, so on anyone else's Mac this DMG trips Gatekeeper.
+`bash Tools/release.sh <version>` is the whole thing in one command. It refuses to build or publish
+until every gate passes: the version matches the tag, release notes exist, the tree is clean, the
+tag is free, unit tests pass, the end to end rig passes on the binary that will actually ship, a
+Developer ID certificate exists, and notary credentials are stored. `--publish` then notarizes,
+staples, tags, and publishes the GitHub release with the changelog section for that version.
 
-Fixed since 1.0.0:
+How it got here:
 
 - **Hardened runtime is on**, on every signing branch rather than only the Developer ID one, so
   what runs daily is what notarization will accept. It needs entitlements as well as TCC grants:

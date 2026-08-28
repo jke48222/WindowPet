@@ -59,11 +59,15 @@ can see them.
   microphone and Apple events need on top of their permission grants.
 - 360 unit tests, up from 131. End to end rig 138 checks, up from 93.
 
+### Released
+
+Signed with `Developer ID Application: Jalen Edusei (PK389W6V96)`, notarized by
+Apple, and stapled. Both the disk image and the app inside it carry their own
+tickets, so the app keeps working after it is dragged out to Applications even
+with no network.
+
 ### Still open
 
-- Not notarized. That needs a Developer ID Application certificate, which
-  needs Apple Developer Program enrollment. Everything downstream of it is
-  wired: `Tools/make-dist.sh --notarize` signs, submits, staples and verifies.
 - Dictation's speech path and the Focus reader have not been exercised against
   real permissions and a real Focus mode. See the README's known gaps.
 
