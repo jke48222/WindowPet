@@ -69,7 +69,7 @@ final class AgentSession {
         pending = nil
         var collected = paused.collected
         if approved {
-            let (result, ok) = AssistantExecutor.executeChecked(paused.action)
+            let (result, ok) = await AssistantExecutor.executeAwaiting(paused.action)
             onProgress?(result)
             collected.append((id: paused.callId, text: result, isError: !ok))
         } else {
@@ -232,7 +232,7 @@ final class AgentSession {
                     return .needsConfirmation(action,
                                               summary: action.confirmationSummary ?? "Confirm this step")
                 }
-                let (result, ok) = AssistantExecutor.executeChecked(action)
+                let (result, ok) = await AssistantExecutor.executeAwaiting(action)
                 onProgress?("Ran \(tool) on \(server)")
                 results.append((id: call.id, text: result, isError: !ok))
                 continue
@@ -259,7 +259,7 @@ final class AgentSession {
                 let summary = action.confirmationSummary ?? "Confirm this step"
                 return .needsConfirmation(action, summary: summary)
             }
-            let (result, ok) = AssistantExecutor.executeChecked(action)
+            let (result, ok) = await AssistantExecutor.executeAwaiting(action)
             onProgress?(result)
             results.append((id: call.id, text: result, isError: !ok))
         }

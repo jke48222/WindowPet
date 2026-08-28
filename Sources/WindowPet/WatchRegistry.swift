@@ -43,7 +43,8 @@ final class WatchRegistry {
         nextID += 1
         watches.append(watch)
         lastActivity[watch.id] = now
-        fingerprints[watch.id] = fingerprint(forApp: name)
+        fingerprints[watch.id] = Self.fingerprint(forApp: name,
+                                                  in: WindowInventory.snapshots())
         startTickerIfNeeded()
         onWatchingChanged?(running.processIdentifier)
         return WatchPolicy.acknowledgement(watch)
@@ -111,11 +112,14 @@ final class WatchRegistry {
         guard !watches.isEmpty else { return stopTicker() }
         let now = CACurrentMediaTime()
         var fired: [(WatchPolicy.Watch, WatchPolicy.Outcome)] = []
+        // One window-list copy per tick, not one per watch. Five watches used
+        // to mean five full CGWindowList copies every second.
+        let snapshots = WindowInventory.snapshots()
 
         for watch in watches {
             let running = AssistantExecutor.runningApp(named: watch.app) != nil
             if running {
-                let current = fingerprint(forApp: watch.app)
+                let current = Self.fingerprint(forApp: watch.app, in: snapshots)
                 if current != fingerprints[watch.id] {
                     fingerprints[watch.id] = current
                     lastActivity[watch.id] = now
@@ -143,8 +147,9 @@ final class WatchRegistry {
 
     /// Position, size and count of the app's windows, as one comparable
     /// string. Geometry only, and no title anywhere near it.
-    private func fingerprint(forApp name: String) -> String {
-        WindowInventory.snapshots()
+    private static func fingerprint(forApp name: String,
+                                    in snapshots: [WindowSnapshot]) -> String {
+        snapshots
             .filter { $0.app == name }
             .map { "\(Int($0.frame.minX)),\(Int($0.frame.minY)),\(Int($0.frame.width)),\(Int($0.frame.height))" }
             .joined(separator: "|")

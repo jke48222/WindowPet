@@ -49,15 +49,19 @@ final class Dictation {
                 self?.type(text)
             },
             problem: { [weak self] message in
-                self?.active = false
-                self?.onProblem?(message)
+                guard let self else { return }
+                self.active = false
+                // A refusal is an end too, and the panel's voice handlers have
+                // to come back either way.
+                self.voice.endDictation()
+                self.onProblem?(message)
             })
     }
 
     func end() {
         guard active else { return }
         active = false
-        voice.endListening()
+        voice.endDictation()
     }
 
     private func type(_ raw: String) {

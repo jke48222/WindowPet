@@ -544,6 +544,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(fda)
         fullDiskItem = fda
         refreshFullDiskItem()
+        menu.addItem(NSMenuItem(title: "What Rusty Can Do…", action: #selector(showHelp),
+                                keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "About WindowPet", action: #selector(showAbout), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Quit WindowPet", action: #selector(quit), keyEquivalent: "q"))
         menu.items.forEach { $0.target = self }
@@ -952,6 +954,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The ability list, shown in his own panel rather than a modal: it is
+    /// scrollable, it is where the conversation already happens, and it means
+    /// the first thing a new user sees is the thing they will actually type
+    /// into.
+    @objc private func showHelp() {
+        commandBar?.show()
+        commandBar?.systemNote(PetHelp.text(
+            summonShortcut: HotKeyStore.current.displayName,
+            dictationShortcut: HotKeyStore.dictation.displayName))
+    }
+
     @objc private func showAbout() {
         NSApp.activate()
         NSApp.orderFrontStandardAboutPanel(options: [
@@ -969,13 +982,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate()
         let alert = NSAlert()
         alert.messageText = "Meet Rusty"
-        alert.informativeText = """
-        He walks along your windows, and he's also a full assistant: tap Option-Space and ask him anything, hold it to talk, or just say "hey rusty".
-
-        A few permissions make him whole. Accessibility lets him ride and slide your windows. Microphone and Speech Recognition make voice work; recognition stays on this Mac. Full Disk Access (menu bar, Grant Full Disk Access) lets him reach protected files when you ask. Anything needing an administrator asks for your password first.
-
-        Bring your own Anthropic API key (menu bar, Anthropic API Key) to give him his smartest brain.
-        """
+        alert.informativeText = PetHelp.onboarding(
+            summonShortcut: HotKeyStore.current.displayName,
+            dictationShortcut: HotKeyStore.dictation.displayName)
         alert.addButton(withTitle: "Open Accessibility Settings")
         alert.addButton(withTitle: "Start")
         if alert.runModal() == .alertFirstButtonReturn {
