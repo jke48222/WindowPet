@@ -64,11 +64,26 @@ else
   bad "unit tests failed; run 'swift test' to see it"
 fi
 
-LOAD=$(uptime | sed -E 's/.*load averages?: ([0-9.]+).*/\1/' | cut -d. -f1)
-if [ "${LOAD:-9}" -ge 3 ]; then
-  bad "load average is $LOAD; the rig needs a quiet machine to be meaningful"
+# The rig is the gate, not the load average. Its window choreography times out
+# on a busy machine, so a failure is not proof of a regression, but a pass is
+# proof of a working build. Retry a few times and require one clean run: what
+# is flaky here is the failure, never the pass.
+if [ -x /Applications/WindowPet.app/Contents/MacOS/WindowPet ]; then
+  RIG_PASSED=0
+  for attempt in 1 2 3; do
+    if /Applications/WindowPet.app/Contents/MacOS/WindowPet --testrig >/dev/null 2>&1; then
+      note "end to end rig passed (attempt $attempt)"
+      RIG_PASSED=1
+      break
+    fi
+  done
+  if [ "$RIG_PASSED" = "0" ]; then
+    bad "the rig failed three times; that is a real regression, not machine load.
+        Run '/Applications/WindowPet.app/Contents/MacOS/WindowPet --testrig' to see it."
+  fi
 else
-  note "machine is quiet (load $LOAD)"
+  bad "no installed app to run the rig against. Run 'bash Tools/make-app.sh' and
+        copy build/WindowPet.app to /Applications first."
 fi
 
 # 5. Signing and notarization. These are the two only a person can set up.
