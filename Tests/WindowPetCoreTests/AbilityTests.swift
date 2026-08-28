@@ -481,3 +481,69 @@ final class ScopedMemoryTests: XCTestCase {
         XCTAssertTrue(memory.promptBlock(inApp: "Anything").contains("prefers Safari"))
     }
 }
+
+// MARK: - The help copy
+
+final class PetHelpTests: XCTestCase {
+
+    private var text: String {
+        PetHelp.text(summonShortcut: "Option-Space", dictationShortcut: "Option-D")
+    }
+
+    /// The shortcuts are substituted, not left as placeholders, and they come
+    /// from what the user actually has bound rather than a hardcoded default.
+    func testShortcutsAreSubstituted() {
+        XCTAssertTrue(text.contains("Option-Space"))
+        XCTAssertTrue(text.contains("Option-D"))
+        XCTAssertFalse(text.contains("the summon shortcut"))
+        XCTAssertFalse(text.contains("the dictation shortcut"))
+    }
+
+    func testEverySectionAppears() {
+        for section in PetHelp.sections {
+            XCTAssertTrue(text.contains(section.title), section.title)
+        }
+    }
+
+    /// The abilities added this session have to be findable, or nobody uses
+    /// them. This is the check that catches a feature shipped without a
+    /// mention.
+    func testTheNewAbilitiesAreMentioned() {
+        let lowered = text.lowercased()
+        for topic in ["drop a file", "put it back", "build finishes", "every weekday",
+                      "dictation", "copied recently", "start recording", "focus"] {
+            XCTAssertTrue(lowered.contains(topic), "help never mentions \(topic)")
+        }
+    }
+
+    /// Everything that gates has to be named in one place a person can read,
+    /// or the safety story is only in the source.
+    func testTheGatedThingsAreListed() {
+        let lowered = text.lowercased()
+        XCTAssertTrue(lowered.contains("administrator"))
+        XCTAssertTrue(lowered.contains("quitting an app"))
+        XCTAssertTrue(lowered.contains("trusted"))
+    }
+
+    /// House style, in the copy a new user reads first.
+    func testHouseStyleHolds() {
+        for body in [text, PetHelp.onboarding(summonShortcut: "Option-Space",
+                                              dictationShortcut: "Option-D")] {
+            XCTAssertFalse(body.contains("\u{2014}"), "em dash in user-facing copy")
+            XCTAssertFalse(body.contains("\u{2013}"), "en dash in user-facing copy")
+            XCTAssertFalse(body.unicodeScalars.contains { $0.properties.isEmoji
+                && $0.properties.isEmojiPresentation }, "emoji in user-facing copy")
+        }
+    }
+
+    func testOnboardingNamesThePermissionsBeforeMacOSAsks() {
+        let onboarding = PetHelp.onboarding(summonShortcut: "Option-Space",
+                                            dictationShortcut: "Option-D")
+        for permission in ["Accessibility", "Microphone", "Speech Recognition",
+                           "Full Disk Access"] {
+            XCTAssertTrue(onboarding.contains(permission), permission)
+        }
+        // And it says what the money situation is, rather than surprising them.
+        XCTAssertTrue(onboarding.contains("daily spending limit"))
+    }
+}

@@ -78,6 +78,18 @@ final class VoiceInput: NSObject, AVSpeechSynthesizerDelegate {
                                 final: ((String) -> Void)?,
                                 state: ((String) -> Void)?)?
 
+    /// Ends a dictation borrow and guarantees the panel's handlers come back.
+    /// `endListening` returns early when the engine never started, and a
+    /// permission refusal never delivers a final result at all, so restoring
+    /// only on delivery would leave the panel's voice replaced for the rest of
+    /// the session.
+    func endDictation() {
+        endListening()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            self?.restoreHandlers()
+        }
+    }
+
     private func restoreHandlers() {
         guard let saved = savedHandlers else { return }
         onPartial = saved.partial

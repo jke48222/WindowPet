@@ -138,9 +138,9 @@ final class MCPHost {
         servers[name] = server
         readLines(from: server)
 
-        guard case .success(let initResult) = call(server: server, method: "initialize",
-                                                   params: MCPProtocol.initializeParams,
-                                                   timeout: 12) else {
+        guard case .success(let initResult) = handshake(server: server, method: "initialize",
+                                                        params: MCPProtocol.initializeParams,
+                                                        timeout: 8) else {
             servers[name] = nil
             process.terminate()
             return .failure(MCPFailure("did not answer the handshake"))
@@ -150,8 +150,8 @@ final class MCPHost {
                                                              params: [:]) {
             try? server.input.write(contentsOf: notification)
         }
-        guard case .success(let listed) = call(server: server, method: "tools/list",
-                                               params: [:], timeout: 12) else {
+        guard case .success(let listed) = handshake(server: server, method: "tools/list",
+                                                    params: [:], timeout: 8) else {
             servers[name] = nil
             process.terminate()
             return .failure(MCPFailure("did not list any tools"))
@@ -161,24 +161,36 @@ final class MCPHost {
     }
 
     /// Runs one tool. `arguments` is the JSON object the model produced.
+    ///
+    /// Async, and deliberately so. A tool call goes to another process and can
+    /// take a minute; waiting for that on the main actor would freeze the
+    /// creature and the panel along with it. The request is written here, on
+    /// the main actor, and only the waiting happens elsewhere.
     func callTool(server serverName: String, tool: String,
-                  arguments: [String: Any]) -> (result: String, ok: Bool) {
+                  arguments: [String: Any]) async -> (result: String, ok: Bool) {
         guard let server = servers[serverName] else {
             return ("The \(serverName) server is not connected.", false)
         }
         let params = MCPProtocol.callParams(tool: tool, arguments: arguments)
-        switch call(server: server, method: "tools/call", params: params, timeout: 60) {
+        switch send(server: server, method: "tools/call", params: params) {
         case .failure(let failure):
             return ("\(serverName) could not run \(tool): \(failure.message)", false)
-        case .success(let result):
-            return (MCPProtocol.resultText(result), !MCPProtocol.isError(result))
+        case .success(let id):
+            switch await Self.awaitReply(server: server, id: id, timeout: 60) {
+            case .failure(let failure):
+                return ("\(serverName) could not run \(tool): \(failure.message)", false)
+            case .success(let result):
+                return (MCPProtocol.resultText(result), !MCPProtocol.isError(result))
+            }
         }
     }
 
     // MARK: - JSON-RPC plumbing
 
-    private func call(server: Server, method: String, params: [String: Any],
-                      timeout: TimeInterval) -> Result<[String: Any], MCPFailure> {
+    /// Writes one request and returns its id. Main-actor work only: allocating
+    /// the id and writing to the pipe, both of which are immediate.
+    private func send(server: Server, method: String,
+                      params: [String: Any]) -> Result<Int, MCPFailure> {
         let id = server.nextID
         server.nextID += 1
         guard let payload = MCPProtocol.encode(id: id, method: method, params: params) else {
@@ -189,6 +201,28 @@ final class MCPHost {
         } catch {
             return .failure(MCPFailure("the server stopped listening"))
         }
+        return .success(id)
+    }
+
+    /// The blocking half, off the main actor. `Server` guards the two fields
+    /// this touches with its lock, which is the whole reason it is unchecked
+    /// Sendable.
+    private nonisolated static func awaitReply(server: Server, id: Int,
+                                               timeout: TimeInterval) async
+        -> Result<[String: Any], MCPFailure> {
+        await withCheckedContinuation { continuation in
+            Thread.detachNewThread {
+                continuation.resume(returning: waitForReply(server: server, id: id,
+                                                            timeout: timeout))
+            }
+        }
+    }
+
+    /// Parks on the server's condition until its reply arrives or the deadline
+    /// passes. Never call this from the main actor.
+    private nonisolated static func waitForReply(server: Server, id: Int,
+                                                 timeout: TimeInterval)
+        -> Result<[String: Any], MCPFailure> {
         let deadline = Date().addingTimeInterval(timeout)
         server.lock.lock()
         defer { server.lock.unlock() }
@@ -196,9 +230,25 @@ final class MCPHost {
             if !server.lock.wait(until: deadline) { break }
         }
         guard let reply = server.replies.removeValue(forKey: id) else {
-            return .failure(MCPFailure(server.closed ? "the server exited" : "the server did not reply in time"))
+            return .failure(MCPFailure(server.closed
+                ? "the server exited" : "the server did not reply in time"))
         }
         return reply
+    }
+
+    /// The startup handshake, which does block the caller. That is deliberate:
+    /// it happens once per server before the app is doing anything else, and a
+    /// tool list arriving after the first question would be missing from it.
+    /// The timeout is short so a misbehaving server delays launch briefly
+    /// rather than hanging it.
+    private func handshake(server: Server, method: String, params: [String: Any],
+                           timeout: TimeInterval) -> Result<[String: Any], MCPFailure> {
+        switch send(server: server, method: method, params: params) {
+        case .failure(let failure):
+            return .failure(failure)
+        case .success(let id):
+            return Self.waitForReply(server: server, id: id, timeout: timeout)
+        }
     }
 
     /// One reader thread per server, parking on the pipe. Blocking reads are

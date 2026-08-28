@@ -115,6 +115,23 @@ enum AssistantExecutor {
     /// the brain uses a miss ("open big brother on paramount plus" is not an
     /// app) as its cue to hand the utterance to a smarter tier instead of
     /// pretending something opened.
+    /// The awaiting twin of `executeChecked`, for callers that can be handed an
+    /// action which waits on another process. Exactly one can: an MCP tool
+    /// call. Everything else falls straight through to the synchronous path,
+    /// so the gate, the recorder and the reporting are identical either way.
+    ///
+    /// Named differently rather than overloaded on purpose: an async overload
+    /// with the same name is picked silently inside any async function, which
+    /// is exactly the kind of thing nobody notices going wrong.
+    static func executeAwaiting(_ action: AssistantAction) async -> (result: String, ok: Bool) {
+        guard case .mcpCall(let server, let tool, let arguments, _) = action else {
+            return executeChecked(action)
+        }
+        let decoded = (try? JSONSerialization.jsonObject(with: Data(arguments.utf8)))
+            as? [String: Any] ?? [:]
+        return await shared.mcp.callTool(server: server, tool: tool, arguments: decoded)
+    }
+
     static func executeChecked(_ action: AssistantAction) -> (result: String, ok: Bool) {
         let outcome = perform(action)
         // Only steps that actually worked join a recording. A trick made of
@@ -189,10 +206,11 @@ enum AssistantExecutor {
         case .readFile(let path):
             return FileReader.toolResult(path: path)
 
-        case .mcpCall(let server, let tool, let arguments, _):
-            let decoded = (try? JSONSerialization.jsonObject(with: Data(arguments.utf8)))
-                as? [String: Any] ?? [:]
-            return shared.mcp.callTool(server: server, tool: tool, arguments: decoded)
+        case .mcpCall:
+            // Unreachable through the loop, which awaits the async twin below.
+            // A synchronous caller handed an MCP action would otherwise block
+            // the main actor on another process, so this refuses instead.
+            return ("That tool has to run without blocking; nothing ran.", false)
 
         // MARK: putting things back, standing asks, learned routines
 
