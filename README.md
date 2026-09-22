@@ -1,5 +1,7 @@
 # WindowPet
 
+[![License](https://img.shields.io/github/license/jke48222/WindowPet)](LICENSE) [![Release](https://img.shields.io/github/v/release/jke48222/WindowPet?label=release)](https://github.com/jke48222/WindowPet/releases/latest) ![Top language](https://img.shields.io/github/languages/top/jke48222/WindowPet) ![platform](https://img.shields.io/badge/platform-macOS-lightgrey) ![dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
+
 A small robot lives on your desktop and treats your real application windows as ground. It stands
 on title bars, rides a window as you drag it, leaps to whatever app you switch to, and falls when
 you close the window under its feet. You can reach in and boop it, pick it up, and throw it,
@@ -11,6 +13,8 @@ at your screen, and run things for you, with every destructive action stopped at
 first.
 
 Zero third party dependencies. `Package.swift` declares no external packages.
+
+![Rusty's sprite frames, midnight and sakura palettes](docs/readme/sprites.png)
 
 ## What problem this solves
 
@@ -515,6 +519,10 @@ How it got here:
 - **Multi-display behavior is tested as policy, not on hardware.** The 13 tests in
   [`DisplayChoiceTests.swift`](Tests/WindowPetCoreTests/DisplayChoiceTests.swift) cover the rules
   for picking a display and clamping to it, but every run so far has been on one screen.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 ---
 
