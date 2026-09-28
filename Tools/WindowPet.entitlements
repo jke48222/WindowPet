@@ -12,9 +12,12 @@
   <true/>
 
   <!-- Apple events: run_applescript is how Rusty reaches Notes, Reminders,
-       Calendar, Music and System Events. Every script still passes the
-       confirmation gate before it runs, and macOS still asks per target app
-       the first time. -->
+       Calendar, Music and System Events. It runs straight through only for a
+       short allow-list of shapes (volume, notifications, dark mode, Music and
+       Spotify playback); every other script, every admin command and every
+       untrusted MCP call waits for a Return in the safety row, which shows the
+       full text that will run. macOS still asks per target app the first
+       time. -->
   <key>com.apple.security.automation.apple-events</key>
   <true/>
 </dict>
