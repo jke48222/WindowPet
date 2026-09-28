@@ -30,6 +30,11 @@ public final class StreamAccumulator {
 
     private var blocks: [Int: Block] = [:]
     private var stopReason: String?
+    /// True once `message_stop` arrives. Together with `stopReason` it is the
+    /// only proof the stream finished: a proxy or a dropped connection can
+    /// close the body cleanly after a few deltas, and that half turn must
+    /// never read as Rusty's answer.
+    private var sawMessageStop = false
     private var errorMessage: String?
     private var sawRefusal = false
 
@@ -93,6 +98,9 @@ public final class StreamAccumulator {
             }
             blocks[index] = block
 
+        case "message_stop":
+            sawMessageStop = true
+
         case "message_delta":
             if let delta = event["delta"] as? [String: Any],
                let reason = delta["stop_reason"] as? String {
@@ -130,10 +138,31 @@ public final class StreamAccumulator {
         event(from: line).flatMap(usage(in:))
     }
 
+    /// Said when the body closed before the API said the message was over.
+    public static let endedEarlyMessage = "the answer stream ended early, try again"
+    /// Said when a tool call's streamed input is not a complete JSON object.
+    public static let cutOffToolMessage = "a tool call came back cut off, try again"
+
     public func finish() -> ClaudeAgent.TurnResult {
         if let errorMessage { return .failed(errorMessage) }
         if sawRefusal { return .refused }
-        guard !blocks.isEmpty else { return .failed("empty stream") }
+        if blocks.isEmpty {
+            // A stream that closed without a message_delta never finished.
+            // One that did finish with no content is a real, empty turn: the
+            // API sends end_turn with no blocks after tool results when there
+            // is nothing left to say. The buffered parser treats that as a
+            // Turn, so the stream must too, or a finished action reads as a
+            // failure.
+            guard let stopReason else { return .failed("empty stream") }
+            return ClaudeAgent.resolveTurn(text: "", calls: [], rawContent: [],
+                                           stopReason: stopReason)
+        }
+        // Content arrived but the message never ended: whatever text or tool
+        // input is here is a fragment. Running it or showing it as the answer
+        // would both be wrong.
+        guard stopReason != nil || sawMessageStop else {
+            return .failed(Self.endedEarlyMessage)
+        }
 
         var rawContent: [[String: Any]] = []
         var text = ""
@@ -151,11 +180,21 @@ public final class StreamAccumulator {
                 rawContent.append(thinking)
             case "tool_use", "server_tool_use":
                 let input: [String: Any]
-                if let data = block.partialJSON.data(using: .utf8),
-                   let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                if block.partialJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // Empty-argument tools stream no JSON at all; the input
+                    // the block opened with (normally {}) is the whole of it.
+                    input = block.original["input"] as? [String: Any] ?? [:]
+                } else if let data = block.partialJSON.data(using: .utf8),
+                          let parsed = (try? JSONSerialization.jsonObject(with: data))
+                              as? [String: Any] {
                     input = parsed
                 } else {
-                    input = [:]  // empty-argument tools stream no JSON at all
+                    // Input that does not parse was cut off mid-argument
+                    // (max_tokens, or a stream that ended early). Running the
+                    // call with {} would act on arguments the model never
+                    // gave, so the whole turn fails instead.
+                    return .failed(stopReason == "max_tokens"
+                        ? ClaudeRouting.answerRanLongMessage : Self.cutOffToolMessage)
                 }
                 var rebuilt = block.original
                 rebuilt["input"] = input

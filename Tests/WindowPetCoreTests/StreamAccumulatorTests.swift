@@ -70,6 +70,7 @@ final class StreamAccumulatorTests: XCTestCase {
             #"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"one "}}"#,
             #"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
             #"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"two"}}"#,
+            #"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
         ]))
         guard case .turn(let turn) = acc.finish() else { return XCTFail("expected turn") }
         XCTAssertEqual(turn.text, "one two")
@@ -153,6 +154,106 @@ final class StreamAccumulatorTests: XCTestCase {
         XCTAssertNil(StreamAccumulator.usage(inLine: "event: ping"))
         XCTAssertNil(StreamAccumulator.usage(inLine: #"data: {"type":"ping"}"#))
         XCTAssertNil(StreamAccumulator.usage(inLine: "not a stream line"))
+    }
+
+    // MARK: - Streams that did not finish
+
+    /// A proxy that closes the body cleanly after a few deltas leaves half a
+    /// sentence. That must never become Rusty's answer (or his memory).
+    func testTextWithoutAnEndIsAFailureNotAnAnswer() {
+        let acc = StreamAccumulator()
+        acc.consume(chunk: sse([
+            #"{"type":"message_start","message":{"usage":{"input_tokens":5}}}"#,
+            #"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            #"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The answer is"}}"#,
+        ]))
+        let result = acc.finish()
+        XCTAssertEqual(result, .failed(StreamAccumulator.endedEarlyMessage))
+        guard case .stop = AgentLoop.decide(result, lastText: "") else {
+            return XCTFail("a half answer must stop the loop, not be spoken")
+        }
+    }
+
+    /// message_stop alone is still proof the message ended.
+    func testMessageStopAloneFinishesTheTurn() {
+        let acc = StreamAccumulator()
+        acc.consume(chunk: sse([
+            #"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            #"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi."}}"#,
+            #"{"type":"message_stop"}"#,
+        ]))
+        guard case .turn(let turn) = acc.finish() else { return XCTFail("expected turn") }
+        XCTAssertEqual(turn.text, "Hi.")
+    }
+
+    /// Input cut mid-argument by max_tokens must not run with `{}`.
+    func testToolCallCutOffByMaxTokensNeverRuns() {
+        let acc = StreamAccumulator()
+        acc.consume(chunk: sse([
+            #"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"mcp__delete","input":{}}}"#,
+            #"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\": \"/Users/x/Doc"}}"#,
+            #"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#,
+            #"{"type":"message_stop"}"#,
+        ]))
+        let result = acc.finish()
+        XCTAssertEqual(result, .failed(ClaudeRouting.answerRanLongMessage))
+        if case .execute = AgentLoop.decide(result, lastText: "") {
+            XCTFail("a cut-off call must never execute")
+        }
+    }
+
+    /// Same fragment, but the body simply ended: still never executed.
+    func testToolCallCutOffByAnEarlyCloseNeverRuns() {
+        let acc = StreamAccumulator()
+        acc.consume(chunk: sse([
+            #"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"type_text","input":{}}}"#,
+            #"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"argument\": \"hel"}}"#,
+        ]))
+        XCTAssertEqual(acc.finish(), .failed(StreamAccumulator.endedEarlyMessage))
+    }
+
+    /// Input that does not parse fails the turn even when a stop reason
+    /// claims the call was complete.
+    func testUnparseableToolInputFailsTheTurn() {
+        let acc = StreamAccumulator()
+        acc.consume(chunk: sse([
+            #"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"open","input":{}}}"#,
+            #"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"argument\": "}}"#,
+            #"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+        ]))
+        XCTAssertEqual(acc.finish(), .failed(StreamAccumulator.cutOffToolMessage))
+    }
+
+    /// max_tokens landing on a tool_use block fails even if the fragment
+    /// happens to parse; generation stopped inside that block.
+    func testMaxTokensOnAToolBlockFailsBothPaths() {
+        let acc = StreamAccumulator()
+        acc.consume(chunk: sse([
+            #"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"open","input":{}}}"#,
+            #"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            #"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#,
+        ]))
+        XCTAssertEqual(acc.finish(), .failed(ClaudeRouting.answerRanLongMessage))
+
+        let buffered = ClaudeAgent.parseTurn(Data(#"""
+        {"type":"message","stop_reason":"max_tokens","content":[
+          {"type":"text","text":"Opening."},
+          {"type":"tool_use","id":"t1","name":"open","input":{"argument":"Saf"}}]}
+        """#.utf8))
+        XCTAssertEqual(buffered, .failed(ClaudeRouting.answerRanLongMessage))
+    }
+
+    /// A text answer that max_tokens cut is still the (partial) answer; only
+    /// tool calls are refused, since they act.
+    func testMaxTokensOnTextStillAnswers() {
+        let acc = StreamAccumulator()
+        acc.consume(chunk: sse([
+            #"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            #"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A long answer"}}"#,
+            #"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#,
+        ]))
+        guard case .turn(let turn) = acc.finish() else { return XCTFail("expected turn") }
+        XCTAssertEqual(turn.text, "A long answer")
     }
 
     func testStreamedTurnEchoesBackIdenticallyToNonStreamed() {
