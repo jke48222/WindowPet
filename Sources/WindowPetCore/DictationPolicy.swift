@@ -135,6 +135,13 @@ public enum DictationPolicy {
 
     /// Said in the bubble while dictation is live, so it is never ambiguous
     /// whether Rusty is listening for himself or for the app in front.
+    /// Typing goes only to the app the hold started in, and never while the
+    /// Mac is locked or asleep. With no known target nothing is typed.
+    public static func mayType(targetPID: Int32?, frontPID: Int32?, suspended: Bool) -> Bool {
+        guard !suspended, let targetPID, let frontPID else { return false }
+        return targetPID == frontPID
+    }
+
     public static func statusLine(app: String?) -> String {
         guard let app, !app.isEmpty else { return "Dictating" }
         return "Dictating into \(app)"
