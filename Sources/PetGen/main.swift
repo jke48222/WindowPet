@@ -6,9 +6,42 @@ import AppKit
 // Craft details that keep it from looking machine-generated: screw slots at
 // irregular angles, one oversized rivet, an off-center antenna, and (on
 // worn skins) chipped enamel plus lithographed pinstripes.
-// Output: argv[1]/pet_<skin>_<frame>.png for every skin, plus pet.png.
+// Usage: swift run PetGen <output directory>
+// argv[1] is the folder to write frames into (normally
+// Sources/WindowPet/Resources); it is created if it does not exist.
+// Output: <dir>/pet_<skin>_<frame>.png for every skin, plus pet.png.
 
 let outDir = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "."
+
+func fail(_ message: String, code: Int32) -> Never {
+    FileHandle.standardError.write(Data("PetGen: \(message)\n".utf8))
+    exit(code)
+}
+
+var outIsDirectory: ObjCBool = false
+if FileManager.default.fileExists(atPath: outDir, isDirectory: &outIsDirectory) {
+    if !outIsDirectory.boolValue {
+        fail("\(outDir) is not a directory; pass the folder to write frames into (e.g. Sources/WindowPet/Resources)",
+             code: 2)
+    }
+} else {
+    do {
+        try FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+    } catch {
+        fail("could not create \(outDir): \(error.localizedDescription)", code: 1)
+    }
+}
+
+func writePNG(_ image: NSBitmapImageRep, to path: String) {
+    guard let png = image.representation(using: .png, properties: [:]) else {
+        fail("could not encode \(path) as PNG", code: 1)
+    }
+    do {
+        try png.write(to: URL(fileURLWithPath: path))
+    } catch {
+        fail("could not write \(path): \(error.localizedDescription)", code: 1)
+    }
+}
 
 struct Pose {
     enum Eyes { case open, alarm, off }
@@ -398,11 +431,11 @@ for i in 0..<10 {
 
 for skin in skins {
     for (name, pose) in frames {
-        try! render(pose, skin).representation(using: .png, properties: [:])!
-            .write(to: URL(fileURLWithPath: "\(outDir)/pet_\(skin.id)_\(name).png"))
+        writePNG(render(pose, skin), to: "\(outDir)/pet_\(skin.id)_\(name).png")
     }
 }
-try! render(frames.first { $0.0 == "idle_0" }!.1, skins[0])
-    .representation(using: .png, properties: [:])!
-    .write(to: URL(fileURLWithPath: "\(outDir)/pet.png"))
+guard let preview = frames.first(where: { $0.0 == "idle_0" }) else {
+    fail("no idle_0 frame to use as the pet.png preview", code: 1)
+}
+writePNG(render(preview.1, skins[0]), to: "\(outDir)/pet.png")
 print("wrote \(frames.count) frames x \(skins.count) skins + pet.png")

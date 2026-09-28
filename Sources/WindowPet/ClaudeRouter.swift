@@ -4,8 +4,8 @@ import WindowPetCore
 /// Cloud brain: routes utterances through the Anthropic Messages API
 /// (claude-opus-5). Sits between the free grammar and the on-device model in
 /// AssistantBrain's chain — used only when a key is configured. Key sources:
-/// UserDefaults "anthropicKey" (menu) or the ANTHROPIC_API_KEY environment
-/// variable, mirroring ElevenLabsTTS.
+/// the login Keychain (set from the menu, see SecretStore) or the
+/// ANTHROPIC_API_KEY environment variable, mirroring ElevenLabsTTS.
 enum ClaudeRouter {
 
     enum RouterError: Error {
@@ -22,7 +22,7 @@ enum ClaudeRouter {
     }
 
     static var apiKey: String? {
-        if let k = UserDefaults.standard.string(forKey: "anthropicKey"), !k.isEmpty { return k }
+        if let k = SecretStore.read(.anthropic) { return k }
         if let k = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"], !k.isEmpty { return k }
         return nil
     }

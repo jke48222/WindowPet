@@ -4,8 +4,8 @@ import WindowPetCore
 
 /// Plays Rusty's replies through ElevenLabs when a key is configured;
 /// callers fall back to the system voice otherwise (or on any failure).
-/// Key sources: UserDefaults "elevenLabsKey" (set via the menu) or the
-/// ELEVENLABS_API_KEY environment variable. Voice/model overridable via
+/// Key sources: the login Keychain (set via the menu, see SecretStore) or
+/// the ELEVENLABS_API_KEY environment variable. Voice/model overridable via
 /// defaults "elevenLabsVoice" / "elevenLabsModel".
 @MainActor
 final class ElevenLabsTTS: NSObject, AVAudioPlayerDelegate {
@@ -24,7 +24,7 @@ final class ElevenLabsTTS: NSObject, AVAudioPlayerDelegate {
     }
 
     static var apiKey: String? {
-        if let k = UserDefaults.standard.string(forKey: "elevenLabsKey"), !k.isEmpty { return k }
+        if let k = SecretStore.read(.elevenLabs) { return k }
         if let k = ProcessInfo.processInfo.environment["ELEVENLABS_API_KEY"], !k.isEmpty { return k }
         return nil
     }

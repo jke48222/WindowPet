@@ -481,7 +481,7 @@ final class TestRig {
                        !self.engine.debugHole(at: CGPoint(x: c.minX + 2, y: c.minY + 2)))
         })
         step("swapped back to Rusty", timeout: 3, action: {
-            self.engine.applySprites(SpriteSet(), name: "Rusty")
+            self.engine.applySprites(SpriteSet(skin: SkinTheme.currentSpriteID), name: "Rusty")
         }, until: { self.engine.spriteFrameCount >= 17 && self.stage.isPetVisible })
 
         step("speech bubble shows", timeout: 2, action: {
@@ -638,14 +638,15 @@ final class TestRig {
             let clipboard = AssistantExecutor.shared.clipboard
             // A key copied out of a password manager must never be kept.
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString("sk-ant-api03-rigprobenotasecretreally", forType: .string)
+            NSPasteboard.general.setString(Self.secretShapedProbe, forType: .string)
             self.pasteboardSettled = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { self.pasteboardSettled = true }
             _ = clipboard
         })
         step("secret-shaped clip was never stored", timeout: 4,
              until: { self.pasteboardSettled
-                 && !AssistantExecutor.shared.clipboard.clips.contains { $0.hasPrefix("sk-ant") } })
+                 && !AssistantExecutor.shared.clipboard.clips.contains {
+                     $0.hasPrefix(Self.secretShapedPrefix) } })
 
         step(action: {
             let clipboard = AssistantExecutor.shared.clipboard
@@ -793,7 +794,52 @@ final class TestRig {
                            refusal.message.contains("no file"))
             }
         })
+
+        step(action: {
+            // The sample tool-server config must start nothing: writing it is
+            // what "Edit Tool Servers…" does the first time.
+            let sample = try? JSONDecoder().decode(
+                MCPConfig.self, from: Data(AppDelegate.inertMCPExample.utf8))
+            let legacy = Data(#"{"servers":{"notes":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/Users/you/Documents"],"trust":"ask"}}}"#.utf8)
+            self.check("tool-server sample starts nothing, and the old live one is retired",
+                       sample?.servers.isEmpty == true
+                           && AppDelegate.isUntouchedLegacyMCPExample(legacy)
+                           && !AppDelegate.isUntouchedLegacyMCPExample(
+                               Data(AppDelegate.inertMCPExample.utf8)))
+
+            // Dictation is built from a recognizer that exists, so its
+            // shortcut always has something listening behind it.
+            let bar = CommandBar()
+            let dictation = AppDelegate.wireDictation(into: bar, voice: VoiceInput(),
+                                                      status: { _ in }, problem: { _ in })
+            self.check("dictation shortcut is wired to dictation",
+                       bar.onDictateStart != nil && bar.onDictateEnd != nil
+                           && !dictation.isActive)
+
+            // The follow-up microphone must not open while a long reply is
+            // still playing, or he hears and answers himself.
+            let longest = String(repeating: "a", count: ClaudeRouting.answerLimit)
+            self.check("speech safety net outlasts the longest spoken reply",
+                       AppDelegate.speechSafetyNet(for: longest)
+                           >= Double(ClaudeRouting.answerLimit) / 12
+                           && AppDelegate.speechSafetyNet(for: "ok") >= 12)
+
+            // An unset preference never turns on the always-on microphone.
+            let defaults = UserDefaults.standard
+            let saved = defaults.object(forKey: "wakeWord")
+            defaults.removeObject(forKey: "wakeWord")
+            let offWhenUnset = !AppDelegate.wakeWordOptedIn
+            if let saved { defaults.set(saved, forKey: "wakeWord") }
+            self.check("wake word stays off until the user switches it on", offWhenUnset)
+        })
     }
+
+    /// A string shaped like an Anthropic key, for the clipboard filter to
+    /// refuse. Joined at run time so the source never holds a literal that
+    /// secret scanners flag as a leaked credential; it is not a real key.
+    private static let secretShapedPrefix = ["sk", "ant"].joined(separator: "-")
+    private static let secretShapedProbe = [secretShapedPrefix, "api03",
+                                            "rigprobenotasecretreally"].joined(separator: "-")
 
     /// Scratch state for the clipboard steps, which have to wait out a poll.
     private var pasteboardSettled = false

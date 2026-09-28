@@ -22,7 +22,7 @@ public enum PetHelp {
         Section(title: "Talking to him", lines: [
             "Tap the summon shortcut and type, or hold it and speak.",
             "Say hey rusty followed by what you want, if the wake word is on.",
-            "Drop a file on him to have him read it.",
+            "Drop a file on him to have him read it. This needs your Anthropic key.",
             "Double click him to open the panel.",
         ]),
         Section(title: "Your windows", lines: [
@@ -71,13 +71,20 @@ public enum PetHelp {
     public static func onboarding(summonShortcut: String, dictationShortcut: String) -> String {
         """
         He walks along your windows, and he is also a full assistant. Tap \
-        \(summonShortcut) and ask him anything, hold it to talk, or say "hey rusty". \
-        Hold \(dictationShortcut) and whatever you say goes straight into the app in \
-        front, with nothing sent anywhere. Drop a file on him and he will read it.
+        \(summonShortcut) and ask him anything, or hold it to talk. Hold \
+        \(dictationShortcut) and whatever you say goes straight into the app in \
+        front, with nothing sent anywhere. With your Anthropic key, drop a file on \
+        him and he will read it.
+
+        "Hey Rusty" is off until you tick the box below. It keeps the \
+        microphone open, and only runs on a Mac that can recognize speech \
+        without sending it anywhere.
 
         A few permissions make him whole. Accessibility lets him ride and \
         arrange your windows. Microphone and Speech Recognition make voice and \
-        dictation work, and recognition stays on this Mac. Full Disk Access, \
+        dictation work. Dictation and the wake word recognize speech on this Mac \
+        only; push to talk does too when the Mac can, and otherwise uses Apple's \
+        speech service. Full Disk Access, \
         under the menu bar, lets him reach protected files when you ask. \
         Anything needing an administrator asks for your password first.
 

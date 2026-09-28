@@ -1,5 +1,8 @@
 import AppKit
+import os
+import Security
 import ServiceManagement
+import Speech
 import WindowPetCore
 
 @main
@@ -62,6 +65,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // activation anyway.
         NSApp.setActivationPolicy(.accessory)
 
+        // Keys typed into older builds sat in the preferences plist, where
+        // any process running as the user can read them. Move them into the
+        // Keychain before anything asks for one.
+        SecretStore.migrateFromDefaults()
+
         stage = OverlayStage()
 
         let verbose: Bool
@@ -73,7 +81,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Character selection: --character <shimeji-pack-dir> (persisted), or
         // the built-in Rusty. A bad path falls back loudly but harmlessly.
-        var sprites = SpriteSet()
+        // A custom skin's ID is "custom:<name>"; the sprites it wears live
+        // under the built-in set it names, so load by the sprite ID.
+        var sprites = SpriteSet(skin: SkinTheme.currentSpriteID)
         characterName = "Rusty (built-in)"
         let args = CommandLine.arguments
         var packPath: String?
@@ -99,8 +109,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Tool servers come up before the mode switch, not with the panel:
         // they are part of what the agent can do, so a headless --ask run and
         // the rig get the same tool list the running pet does.
-        AssistantExecutor.shared.mcp.startAll()
-        ClaudeAgent.mcpTools = AssistantExecutor.shared.mcp.toolDefinitions
+        // Only the pet asks about a new or changed entry, since only it has a
+        // person there to answer; headless modes skip unapproved entries.
+        // MCPHost keeps ClaudeAgent.mcpTools current as servers connect.
+        // A headless --ask run starts them itself and waits for the list.
+        Self.retireLegacyMCPExample()
+        switch mode {
+        case .pet: AssistantExecutor.shared.mcp.startAll(askForApproval: true)
+        case .ask: break
+        default: AssistantExecutor.shared.mcp.startAll()
+        }
 
         switch mode {
         case .pet:
@@ -117,8 +135,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             print("diag: voice permissions = \(VoiceInput.authorizationSummary)")
             print("diag: reply voice = \(ElevenLabsTTS.apiKey == nil ? "system (no ElevenLabs key)" : "ElevenLabs")")
             print("diag: fallback voice = \(VoiceInput.fallbackVoiceDescription)")
-            print("diag: voice provider = \(VoiceInput.provider) (edge-tts \(EdgeTTSPlayer.isAvailable ? "available" : "NOT available"))")
-            print("diag: wake word = \(UserDefaults.standard.object(forKey: "wakeWord") == nil || UserDefaults.standard.bool(forKey: "wakeWord") ? "on" : "off")")
+            EdgeTTSPlayer.whenProbed { found in
+                print("diag: voice provider = \(VoiceInput.provider) (edge-tts \(found ? "available" : "NOT available"))")
+            }
+            print("diag: wake word = \(Self.wakeWordOptedIn ? "on" : "off")"
+                  + " (on-device recognition \(Self.wakeWordCanStayOnDevice ? "available" : "NOT available"))")
             if let front = NSWorkspace.shared.frontmostApplication {
                 print("diag: frontmost app = \(front.localizedName ?? "?") pid=\(front.processIdentifier)")
             }
@@ -133,7 +154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 for line in self?.engine.tier2.summaryLines ?? [] { print("diag: tier2 — \(line)") }
                 print("diag: summon = \(HotKeyStore.current.displayName), "
                       + "dictation = \(HotKeyStore.dictation.displayName)")
-                print("diag: quiet hours = \(self?.quietHours?.isEnabled == false ? "off" : "on")"
+                print("diag: quiet hours = \(self?.quietHours.isEnabled == false ? "off" : "on")"
                       + ", focus \(QuietHours.focusIsOn ? "on" : "off")"
                       + ", mic \(QuietHours.microphoneInUseElsewhere ? "in use elsewhere" : "free")")
                 let services = AssistantExecutor.shared
@@ -156,7 +177,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             session.onTextDelta = { chunk in
                 FileHandle.standardOutput.write(Data(chunk.utf8))
             }
+            // A keyless run must fail before it spawns any of the user's MCP
+            // servers; AgentSession would refuse anyway, but only after them.
+            guard ClaudeRouter.isConfigured else {
+                print("failed: \(AgentSession.notConfigured)")
+                exit(1)
+            }
             Task {
+                // Handshakes are asynchronous; the run must see the tools.
+                await AssistantExecutor.shared.mcp.startAllAndWait()
                 let step = await session.start(prompt, context: "headless test run",
                                                history: [])
                 await MainActor.run {
@@ -236,7 +265,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func installCommandBar() {
         let bar = CommandBar()
-        bar.registerHotKey() // ⌥Space
         bar.petAnchorProvider = { [weak self] in self?.engine.anchor ?? .zero }
         bar.contextProvider = { [weak self] in self?.engine.assistantContext() ?? "" }
         // Every input method lands in the same chat panel; this is the one
@@ -251,13 +279,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if fromVoice {
                     self.speakThenListen(line)
                 } else {
-                    self.voice?.speak(line)
+                    self.speakPlain(line)
                 }
             case .reply(let reply):
                 if fromVoice {
                     self.speakThenListen(reply)
                 } else {
-                    self.voice?.speak(reply)
+                    self.speakPlain(reply)
                 }
             case .needsConfirmation:
                 // The user is at the keyboard for the safety check.
@@ -270,19 +298,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Dropping a file on him is the most direct thing you can ask a
         // creature standing on your screen to do.
         stage.onFilesDropped = { [weak bar] urls in bar?.submitDroppedFiles(urls) }
+        // A standing ask's answer goes through the quiet gate like a watch
+        // firing, instead of talking over whatever the user is doing.
+        bar.onScheduledAnswer = { [weak self] text in self?.announce(text, spoken: true) }
         commandBar = bar
+
+        // Tool servers connect in the background: keep the menu line right as
+        // each finishes or exits, and put the real result in the panel once
+        // a start (launch or Reconnect) is done.
+        let host = AssistantExecutor.shared.mcp
+        host.onChange = { [weak self] in self?.mcpItem?.title = self?.mcpMenuTitle() ?? "" }
+        host.onStartupFinished = { [weak self] report in
+            guard let self else { return }
+            self.mcpItem?.title = self.mcpMenuTitle()
+            guard self.mcpReportWanted else { return }
+            self.mcpReportWanted = false
+            self.commandBar?.systemNote(report.isEmpty
+                ? "No tool servers are configured. Choose Edit Tool Servers to add one."
+                : report.joined(separator: "; "))
+        }
 
         // Long-lived services. The watch registry keeps ticking between
         // turns, which is the point of it, and speaks through the panel when
         // something it promised to notice happens.
         // Anything Rusty says unprompted goes through the quiet gate first,
-        // so a watch firing never talks over a call.
-        let quiet = QuietHours()
+        // so a watch firing never talks over a call. The gate itself exists
+        // from launch, so the menu and --diag read its real setting.
+        let quiet = quietHours
         quiet.speakingProvider = { [weak self] in self?.voice?.willSpeak ?? false }
-        quiet.suspendedProvider = { [weak self] in self?.engine.stateName == "suspended" }
+        // Locked or asleep holds announcements even if the engine has not
+        // caught up yet: waking is not unlocking.
+        quiet.suspendedProvider = { [weak self] in
+            ScreenLock.shared.isSuspended || self?.engine.stateName == "suspended"
+        }
         quiet.immersionProvider = { [weak self] in self?.engine.immersionActive ?? false }
         quiet.onRelease = { [weak self] message in self?.announce(message, spoken: true) }
-        quietHours = quiet
 
         AssistantExecutor.shared.watches.onFire = { [weak self] message in
             self?.announce(message, spoken: true)
@@ -304,32 +354,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         AssistantExecutor.shared.clipboard.start()
 
-        // Dictation: hold the second shortcut and speak into whatever app is
-        // in front. No model, no request, nothing leaves the machine.
-        if let voice {
-            let dictation = Dictation(voice: voice)
-            dictation.onStatus = { [weak self] text in self?.stage.say(text, for: 2.5) }
-            dictation.onProblem = { [weak self] message in
-                self?.commandBar?.systemNote(message)
-            }
-            self.dictation = dictation
-            bar.onDictateStart = { [weak self] in self?.dictation?.begin() }
-            bar.onDictateEnd = { [weak self] in self?.dictation?.end() }
-        }
-
-        // A3: hold ⌥Space to talk; the live transcript streams into the
-        // chat panel (dimmed until final).
+        // Push to talk: hold ⌥Space; the live transcript streams into the
+        // chat panel (dimmed until final). Built first: dictation borrows
+        // this same recognizer, so it has to exist before dictation does.
         let voice = VoiceInput()
         let eleven = ElevenLabsTTS()
         eleven.onError = { [weak bar] message in bar?.systemNote(message) }
         voice.eleven = eleven
         voice.edge = EdgeTTSPlayer()
-        voice.onState = { [weak bar] state in
-            if state != "listening" { bar?.systemNote(state) }
+        voice.onState = { [weak self, weak bar] state in
+            guard state != "listening" else { return }
+            bar?.systemNote(state)
+            // Every other state is a refusal or a failure (permission denied,
+            // no recognizer, no microphone), and none of them ever delivers a
+            // final transcript, so the wake word has to be handed back here.
+            self?.wake?.reclaimMicrophone()
         }
         voice.onPartial = { [weak bar] text in bar?.voiceTranscript(text) }
-        voice.onFinal = { [weak bar] text in bar?.finishVoice(text) }
+        voice.onFinal = { [weak self, weak bar] text in
+            bar?.finishVoice(text)
+            // Push-to-talk is over the moment its transcript lands, heard or
+            // not. An empty one never reaches onOutcome, so waiting for the
+            // reply to reclaim the microphone would leave "hey rusty" dead.
+            // A new press may already be listening when the previous press's
+            // transcript is delivered; that press reclaims it when it ends.
+            if self?.voice?.isListening != true { self?.wake?.reclaimMicrophone() }
+        }
         bar.onHoldStart = { [weak self] in
+            self?.cancelPendingFollowUp()
             self?.wake?.yieldMicrophone()
             self?.commandBar?.beginVoice()
             self?.voice?.beginListening()
@@ -337,7 +389,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bar.onHoldEnd = { [weak self] in self?.voice?.endListening() }
         self.voice = voice
 
-        // A4: "Hey Rusty" — always-on wake word (menu-toggleable). A one-shot
+        // Dictation: hold the second shortcut and speak into whatever app is
+        // in front. No model, no request, nothing leaves the machine.
+        dictation = Self.wireDictation(
+            into: bar, voice: voice,
+            status: { [weak self] text in self?.stage.say(text, for: 2.5) },
+            problem: { [weak self] message in self?.commandBar?.systemNote(message) })
+
+        // Both shortcuts are registered only now, once the dictation handlers
+        // exist, so the dictation combination is never taken from other apps
+        // without something listening for it.
+        bar.registerHotKey()
+
+        // "Hey Rusty": the opt-in wake word (menu or onboarding). A one-shot
         // utterance ("hey rusty mute the sound") routes directly; a bare
         // "hey rusty" opens hands-free capture that ends on silence. All of
         // it plays out in the chat panel.
@@ -368,13 +432,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 SoundFX.shared.play("miss")
             }
             self.followUpActive = false
-            self.commandBar?.finishVoice(text)
+            // Hands-free capture is heard, not typed: the wake-word rules
+            // for confirmation apply.
+            self.commandBar?.finishVoice(text, fromWakeWord: true)
+        }
+        wake.onCaptureCancelled = { [weak self] in
+            guard let self else { return }
+            // Lock, sleep, push-to-talk or switching the wake word off cut a
+            // capture short; it is dropped, never submitted.
+            self.followUpActive = false
+            if ScreenLock.shared.isSuspended { self.commandBar?.endVoiceQuietly() }
         }
         self.wake = wake
-        if UserDefaults.standard.object(forKey: "wakeWord") == nil
-            || UserDefaults.standard.bool(forKey: "wakeWord") {
-            wake.setEnabled(true)
+        // Off unless the user switched it on: an unset preference never
+        // starts the microphone or raises a permission prompt.
+        if Self.wakeWordOptedIn {
+            if Self.wakeWordCanStayOnDevice {
+                wake.setEnabled(true)
+            } else {
+                bar.systemNote(Self.wakeWordNeedsOnDeviceNote)
+            }
         }
+    }
+
+    /// Joins dictation to the panel's shortcut. Takes the recognizer as a
+    /// non-optional argument so the handlers can never be left unset by a
+    /// voice that does not exist yet (the rig checks this wiring).
+    static func wireDictation(into bar: CommandBar, voice: VoiceInput,
+                              status: @escaping (String) -> Void,
+                              problem: @escaping (String) -> Void) -> Dictation {
+        let dictation = Dictation(voice: voice)
+        dictation.onStatus = status
+        dictation.onProblem = problem
+        bar.onDictateStart = { [weak dictation] in dictation?.begin() }
+        bar.onDictateEnd = { [weak dictation] in dictation?.end() }
+        return dictation
+    }
+
+    // MARK: - Wake word consent
+
+    /// The wake word listens continuously, so it runs only once the user has
+    /// said yes. A preference that was never set means no.
+    static var wakeWordOptedIn: Bool {
+        UserDefaults.standard.bool(forKey: "wakeWord")
+    }
+
+    /// Continuous listening must never fall back to server recognition: on a
+    /// Mac or locale without on-device support the wake word stays off.
+    static var wakeWordCanStayOnDevice: Bool {
+        SFSpeechRecognizer(locale: Locale(identifier: "en-US"))?.supportsOnDeviceRecognition == true
+    }
+
+    static let wakeWordNeedsOnDeviceNote =
+        "“Hey Rusty” stays off on this Mac: it cannot recognize speech on device here, and I will not stream an always-on microphone to a server. Hold the summon shortcut to talk instead."
+
+    /// Turns the wake word on at the user's request, refusing when it would
+    /// have to send audio off the machine. Returns whether it is now on.
+    @discardableResult
+    private func enableWakeWord() -> Bool {
+        guard Self.wakeWordCanStayOnDevice else {
+            commandBar?.systemNote(Self.wakeWordNeedsOnDeviceNote)
+            wakeItem?.state = .off
+            return false
+        }
+        wake?.setEnabled(true)
+        wakeItem?.state = .on
+        return true
     }
 
     /// Voice continuity: speak the reply, and once the audio finishes (or
@@ -382,34 +505,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the user can keep talking without another "hey rusty". Silence in
     /// that window ends the conversation quietly.
     private var followUpActive = false
+    /// Identifies the reply whose end may reopen the microphone. Every new
+    /// reply, push-to-talk and typed answer bumps it, so the finish callback
+    /// and safety net of an earlier reply can never fire into a later one.
+    private var followUpGeneration = 0
+
+    /// Forgets any follow-up still waiting on a reply, and returns the
+    /// generation a new one should carry.
+    @discardableResult
+    private func cancelPendingFollowUp() -> Int {
+        followUpGeneration &+= 1
+        voice?.onSpeechFinished = nil
+        return followUpGeneration
+    }
+
+    /// A reply to something typed: spoken, with no microphone afterwards.
+    private func speakPlain(_ line: String) {
+        cancelPendingFollowUp()
+        voice?.speak(line)
+    }
 
     private func speakThenListen(_ line: String) {
+        let generation = cancelPendingFollowUp()
         guard let wake, wake.enabled else {
             voice?.speak(line)
             self.wake?.reclaimMicrophone()
             return
         }
+        // Runs at most once per reply: the first of the finish callback and
+        // the safety net consumes the generation, the other becomes a no-op.
         let startFollowUp = { [weak self] in
-            guard let self else { return }
+            guard let self, self.followUpGeneration == generation else { return }
+            self.followUpGeneration &+= 1
+            self.voice?.onSpeechFinished = nil
             self.followUpActive = true
             self.wake?.reclaimMicrophone()
             self.wake?.beginFollowUpCapture()
         }
         if let voice, voice.willSpeak {
-            voice.onSpeechFinished = { [weak self] in
-                self?.voice?.onSpeechFinished = nil
+            voice.speak(line)
+            voice.onSpeechFinished = {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { startFollowUp() }
             }
-            voice.speak(line)
-            // Safety net: if no provider ever reports finishing, reopen anyway.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
-                guard let self, self.voice?.onSpeechFinished != nil else { return }
-                self.voice?.onSpeechFinished = nil
-                startFollowUp()
-            }
+            // Safety net for a provider that never reports finishing. It is
+            // sized to outlast the longest the reply could take to synthesise
+            // and play, so it can never open the microphone while he is still
+            // talking and let him hear, and answer, his own reply.
+            let net = Self.speechSafetyNet(for: line)
+            DispatchQueue.main.asyncAfter(deadline: .now() + net) { startFollowUp() }
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { startFollowUp() }
         }
+    }
+
+    /// How long to wait for a spoken reply to finish before reopening the
+    /// microphone anyway. Assumes 10 characters a second, slower than any of
+    /// the voices speak (the system voice at rate 0.5 and the neural voices
+    /// run at roughly 14 to 16), plus 6 s for synthesis and download before
+    /// playback starts, never less than the old 12 s floor. A late net only
+    /// means saying "hey rusty" again; an early one makes him talk to himself.
+    nonisolated static func speechSafetyNet(for line: String) -> TimeInterval {
+        let playback = Double(line.count) / 10
+        return min(max(12, 6 + playback), 900)
     }
 
     private func installStatusItem() {
@@ -424,6 +581,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             item.button?.title = "R"
         }
+        // The icon is the app's only persistent control, so VoiceOver and
+        // hover both need a name for it whichever fallback drew it.
+        item.button?.setAccessibilityLabel("WindowPet")
+        item.button?.toolTip = "WindowPet"
         let menu = NSMenu()
         let info = NSMenuItem(title: "Waking up…", action: nil, keyEquivalent: "")
         info.isEnabled = false
@@ -452,7 +613,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         abilities.addItem(.separator())
         let quietItem = NSMenuItem(title: "Stay Quiet During Focus And Calls",
                                    action: #selector(toggleQuietHours), keyEquivalent: "")
-        quietItem.state = (quietHours?.isEnabled ?? true) ? .on : .off
+        quietItem.state = quietHours.isEnabled ? .on : .off
         abilities.addItem(quietItem)
         quietHoursItem = quietItem
         abilities.addItem(NSMenuItem(title: "Dictation Shortcut…",
@@ -476,11 +637,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         let voiceMenu = NSMenu()
         for (title, key) in [("ElevenLabs (Jessica)", "elevenlabs"),
-                             ("Microsoft Neural (Free)", "edge"),
+                             ("Microsoft Neural (online, sends replies to Microsoft)", "edge"),
                              ("macOS System Voice", "system")] {
             let item = NSMenuItem(title: title, action: #selector(pickVoiceProvider(_:)), keyEquivalent: "")
             item.representedObject = key
             item.target = self
+            switch key {
+            case "edge": item.toolTip = EdgeTTSPlayer.privacyNote
+            case "elevenlabs": item.toolTip = "Sends the text of each spoken reply to ElevenLabs, using your own key."
+            default: item.toolTip = "Speaks on this Mac. Nothing is sent anywhere."
+            }
             item.state = VoiceInput.provider == key ? .on : .off
             voiceMenu.addItem(item)
         }
@@ -518,9 +684,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshHotKeyItem()
         elevenLabsItem = elevenItem
         let wakeItem = NSMenuItem(title: "“Hey Rusty” Wake Word", action: #selector(toggleWake(_:)), keyEquivalent: "")
-        wakeItem.state = (UserDefaults.standard.object(forKey: "wakeWord") == nil
-                          || UserDefaults.standard.bool(forKey: "wakeWord")) ? .on : .off
+        wakeItem.state = Self.wakeWordOptedIn ? .on : .off
         menu.addItem(wakeItem)
+        self.wakeItem = wakeItem
         let spoken = NSMenuItem(title: "Spoken Replies", action: #selector(toggleSpoken), keyEquivalent: "")
         spoken.state = (UserDefaults.standard.object(forKey: "spokenReplies") == nil
                         || UserDefaults.standard.bool(forKey: "spokenReplies")) ? .on : .off
@@ -531,9 +697,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let login = NSMenuItem(title: "Start at Login", action: #selector(toggleLogin(_:)), keyEquivalent: "")
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
-        let assistant = NSMenuItem(title: "Assistant…", action: #selector(showAssistant), keyEquivalent: " ")
-        assistant.keyEquivalentModifierMask = [.option]
+        // The summon shortcut is user-rebindable, so the item names the live
+        // binding in its title instead of a fixed key equivalent that would go
+        // stale (and only ever fired while the menu was open anyway).
+        let assistant = NSMenuItem(title: "", action: #selector(showAssistant), keyEquivalent: "")
         menu.addItem(assistant)
+        assistantItem = assistant
+        refreshHotKeyItem()
         menu.addItem(NSMenuItem(title: "Choose Character…", action: #selector(chooseCharacter), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Use Built-In Rusty", action: #selector(useBuiltin), keyEquivalent: ""))
         menu.addItem(.separator())
@@ -645,7 +815,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func useBuiltin() {
-        engine.applySprites(SpriteSet(), name: "Rusty")
+        engine.applySprites(SpriteSet(skin: SkinTheme.currentSpriteID), name: "Rusty")
         UserDefaults.standard.removeObject(forKey: "characterPath")
         characterName = "Rusty (built-in)"
         characterItem?.title = "Character: \(characterName)"
@@ -656,9 +826,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var elevenLabsItem: NSMenuItem?
     private var voiceProviderMenu: NSMenu?
 
+    private static let edgeNoticeSeenKey = "edgeVoiceNoticeSeen"
+
     @objc private func pickVoiceProvider(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String else { return }
-        UserDefaults.standard.set(key, forKey: "voiceProvider")
+        // The Microsoft voice is an online service: an informed opt-in, asked
+        // once, before any reply goes there.
+        if key == "edge", !UserDefaults.standard.bool(forKey: Self.edgeNoticeSeenKey) {
+            NSApp.activate()
+            let alert = NSAlert()
+            alert.messageText = "Use the Microsoft voice?"
+            alert.informativeText = EdgeTTSPlayer.privacyNote
+                + " The macOS System Voice speaks on this Mac and sends nothing."
+            alert.addButton(withTitle: "Use Microsoft Voice")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            UserDefaults.standard.set(true, forKey: Self.edgeNoticeSeenKey)
+        }
+        UserDefaults.standard.set(key, forKey: VoiceInput.providerKey)
+        if key == "edge" { EdgeTTSPlayer.refresh() }
         voiceProviderMenu?.items.forEach {
             $0.state = ($0.representedObject as? String) == key ? .on : .off
         }
@@ -666,43 +852,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func elevenLabsMenuTitle() -> String { "ElevenLabs API Key…" }
 
-    /// The key is typed directly into the app (secure field) and stored
-    /// locally — it never passes through anything else.
+    /// The key is typed directly into the app (secure field) and kept in the
+    /// login Keychain — it never passes through anything else.
     @objc private func setElevenKey() {
         NSApp.activate()
         let alert = NSAlert()
         alert.messageText = "ElevenLabs API Key"
-        alert.informativeText = "Stored locally in this app's preferences. Leave empty to remove and use the system voice. Only Rusty's short replies are sent to ElevenLabs."
+        alert.informativeText = "Stored in your login Keychain on this Mac, never in a preferences file. Leave empty to remove and use the system voice. Only Rusty's short replies are sent to ElevenLabs."
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
         field.placeholderString = "xi-…"
         alert.accessoryView = field
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn {
-            let key = field.stringValue.trimmingCharacters(in: .whitespaces)
-            if key.isEmpty {
-                UserDefaults.standard.removeObject(forKey: "elevenLabsKey")
-            } else {
-                UserDefaults.standard.set(key, forKey: "elevenLabsKey")
-            }
+            storeSecret(field.stringValue, as: .elevenLabs)
             elevenLabsItem?.title = elevenLabsMenuTitle()
         }
     }
 
     private var clipboardHistoryItem: NSMenuItem?
     private var mcpItem: NSMenuItem?
+    /// Set by Reconnect so its outcome is posted in the panel once the
+    /// handshakes finish; the launch-time start only updates the menu.
+    private var mcpReportWanted = false
     private var quietHoursItem: NSMenuItem?
     private var dictation: Dictation?
-    private var quietHours: QuietHours?
+    private let quietHours = QuietHours()
+    private var wakeItem: NSMenuItem?
 
     /// One door for everything Rusty says without being asked. It always
     /// reaches the panel; whether it is spoken depends on the moment.
     private func announce(_ text: String, spoken: Bool) {
-        guard let quiet = quietHours else {
-            commandBar?.announce(text)
-            return
-        }
-        let decision = quiet.offer(text)
+        let decision = quietHours.offer(text)
         commandBar?.announce(decision.show, speak: spoken && decision.speak != nil)
     }
 
@@ -729,10 +910,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleQuietHours() {
-        let on = !(quietHours?.isEnabled ?? true)
+        let on = !quietHours.isEnabled
         UserDefaults.standard.set(on, forKey: "quietHours")
         quietHoursItem?.state = on ? .on : .off
-        if !on { quietHours?.clear() }
+        if !on { quietHours.clear() }
         commandBar?.systemNote(on
             ? "I will hold anything I want to say while Focus is on, your microphone is in use, or the screen is locked, and say it when the moment passes."
             : "I will speak up whenever I have something, Focus or not.")
@@ -749,8 +930,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.commandBar?.systemNote("That is already the shortcut for summoning me. Pick a different one.")
                 return
             }
+            let previous = HotKeyStore.dictation
             HotKeyStore.save(binding, for: .dictate)
-            self.commandBar?.applyDictationHotKey(binding)
+            guard self.commandBar?.applyDictationHotKey(binding) != false else {
+                HotKeyStore.save(previous, for: .dictate)
+                self.commandBar?.applyDictationHotKey(previous)
+                self.commandBar?.systemNote("macOS would not give me \(binding.displayName); another app holds it. Kept the old shortcut.")
+                return
+            }
             self.commandBar?.systemNote("Hold \(binding.displayName) and speak, and the words go into whatever app is in front. Nothing is sent anywhere and nothing is spent.")
         }
     }
@@ -760,27 +947,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         commandBar?.systemNote("Forgot the copied clips.")
     }
 
-    /// Opens mcp.json in the user's editor, writing a commented example first
+    /// Opens mcp.json in the user's editor, writing an inert example first
     /// if there is nothing there yet. Editing a config by hand is the right
-    /// interface for this: it is a list of commands to run.
+    /// interface for this: it is a list of commands to run. JSON has no
+    /// comments, so the sample sits under a key the host ignores and nothing
+    /// runs until the user moves it into `servers` themselves.
     @objc private func editMCPConfig() {
         let url = MCPHost.configURL
         if !FileManager.default.fileExists(atPath: url.path) {
-            try? Data(MCPConfig.example.utf8).write(to: url, options: .atomic)
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+            try? Data(Self.inertMCPExample.utf8).write(to: url, options: .atomic)
         }
         NSWorkspace.shared.open(url)
-        commandBar?.systemNote("Opened mcp.json. Add a server, save, then choose Reconnect Tool Servers.")
+        commandBar?.systemNote("Opened mcp.json. Move the example into \"servers\" (or add your own), save, then choose Reconnect Tool Servers.")
+    }
+
+    /// Starts nothing: `servers` is empty and the sample lives under
+    /// `_example`, which the config decoder does not read.
+    static let inertMCPExample = MCPConfig.example
+
+    /// Earlier builds wrote the sample as a live server, so opening the file
+    /// once made every launch run `npx -y` against a placeholder folder.
+    /// A config whose only server still points at that placeholder was never
+    /// edited, so it is swapped for the inert sample before anything starts.
+    static func retireLegacyMCPExample() {
+        let url = MCPHost.configURL
+        guard let data = try? Data(contentsOf: url),
+              isUntouchedLegacyMCPExample(data) else { return }
+        try? Data(inertMCPExample.utf8).write(to: url, options: .atomic)
+    }
+
+    static func isUntouchedLegacyMCPExample(_ data: Data) -> Bool {
+        MCPConfig.isUntouchedLegacyExample(data)
     }
 
     @objc private func reloadMCP() {
-        let host = AssistantExecutor.shared.mcp
-        host.startAll()
-        ClaudeAgent.mcpTools = host.toolDefinitions
+        // Right after startAll the report only says "starting"; the real
+        // result reaches the panel through onStartupFinished. Reconnect is
+        // where a new or changed entry gets reviewed, so it asks.
+        mcpReportWanted = true
+        AssistantExecutor.shared.mcp.startAll(askForApproval: true)
         mcpItem?.title = mcpMenuTitle()
-        let report = host.startupReport
-        commandBar?.systemNote(report.isEmpty
-            ? "No tool servers are configured. Choose Edit Tool Servers to add one."
-            : report.joined(separator: "; "))
     }
 
     /// The ceiling on what Rusty may spend per day. Enforced before every
@@ -811,25 +1019,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Same local-only handling as the ElevenLabs key: secure field, stored
-    /// in preferences, never displayed back.
+    /// in the Keychain, never displayed back.
     @objc private func setAnthropicKey() {
         NSApp.activate()
         let alert = NSAlert()
         alert.messageText = "Anthropic API Key"
-        alert.informativeText = "Unlocks the Claude brain for Rusty's answers. Stored locally in this app's preferences; only your command text and a one-line context summary are sent to Anthropic. Leave empty to remove and use the on-device brain."
+        alert.informativeText = "Unlocks the Claude brain for Rusty's answers. Stored in your login Keychain on this Mac, never in a preferences file. Rusty sends Anthropic your request, recent conversation, remembered facts, a short summary of your windows, and, when a request uses them, a screenshot of the screen, file contents and clipboard text. Leave empty to remove and use the on-device brain."
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
         field.placeholderString = "sk-ant-…"
         alert.accessoryView = field
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn {
-            let key = field.stringValue.trimmingCharacters(in: .whitespaces)
-            if key.isEmpty {
-                UserDefaults.standard.removeObject(forKey: "anthropicKey")
-            } else {
-                UserDefaults.standard.set(key, forKey: "anthropicKey")
-            }
+            storeSecret(field.stringValue, as: .anthropic)
             brainItem?.title = "Brain: \(AssistantBrain.brainDescription)"
+        }
+    }
+
+    /// Saves (or, when empty, removes) a key in the Keychain and says so
+    /// plainly if the Keychain refused, rather than pretending it worked.
+    private func storeSecret(_ typed: String, as secret: SecretStore.Secret) {
+        let key = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if key.isEmpty {
+            SecretStore.remove(secret)
+            return
+        }
+        let status = SecretStore.write(key, for: secret)
+        if status != errSecSuccess {
+            let complaint = NSAlert()
+            complaint.messageText = "The key was not saved"
+            complaint.informativeText = "The Keychain refused it (\(SecretStore.describe(status))). Nothing was written anywhere else."
+            complaint.runModal()
         }
     }
 
@@ -921,10 +1141,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var usageItem: NSMenuItem?
     private var hotKeyItem: NSMenuItem?
+    private var assistantItem: NSMenuItem?
     private var hotKeyRecorder: HotKeyRecorder?
 
     private func refreshHotKeyItem() {
-        hotKeyItem?.title = "Shortcut: \(HotKeyStore.current.displayName)…"
+        let shortcut = HotKeyStore.current.displayName
+        hotKeyItem?.title = "Shortcut: \(shortcut)…"
+        assistantItem?.title = "Assistant (\(shortcut))…"
     }
 
     /// Lets the user rebind the summon shortcut, which is also how they get
@@ -936,8 +1159,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.hotKeyRecorder = nil
             guard let binding else { return }
+            // Carbon refuses a combination this app already holds, so taking
+            // the dictation shortcut would silently leave no summon key.
+            guard !HotKeyStore.collides(binding, with: .summon) else {
+                self.commandBar?.systemNote("That is already the dictation shortcut. Pick a different one.")
+                return
+            }
+            let previous = HotKeyStore.current
             HotKeyStore.save(binding)
-            self.commandBar?.applyHotKey(binding)
+            guard self.commandBar?.applyHotKey(binding) != false else {
+                HotKeyStore.save(previous)
+                self.commandBar?.applyHotKey(previous)
+                self.commandBar?.systemNote("macOS would not give me \(binding.displayName); another app holds it. Kept the old shortcut.")
+                return
+            }
             self.refreshHotKeyItem()
             self.commandBar?.systemNote("Shortcut is now \(binding.displayName).")
         }
@@ -987,15 +1222,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             dictationShortcut: HotKeyStore.dictation.displayName)
         alert.addButton(withTitle: "Open Accessibility Settings")
         alert.addButton(withTitle: "Start")
-        if alert.runModal() == .alertFirstButtonReturn {
+        // The wake word is the one feature that listens all the time, so it
+        // is a choice made here, unticked, not a default.
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Listen for “Hey Rusty” (keeps the microphone on, recognized on this Mac)"
+        alert.suppressionButton?.state = .off
+        let response = alert.runModal()
+        if alert.suppressionButton?.state == .on {
+            enableWakeWord()
+        }
+        if response == .alertFirstButtonReturn {
             enableSenses()
         }
     }
 
     @objc private func toggleWake(_ sender: NSMenuItem) {
-        let newState = !(wake?.enabled ?? false)
-        wake?.setEnabled(newState)
-        sender.state = newState ? .on : .off
+        if wake?.enabled == true {
+            wake?.setEnabled(false)
+            sender.state = .off
+        } else {
+            enableWakeWord()
+        }
     }
 
     @objc private func toggleSpoken(_ sender: NSMenuItem) {
@@ -1006,4 +1253,129 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
+}
+
+/// API keys live in the login Keychain, not in UserDefaults: the preferences
+/// plist is plain text that any process running as the user can read with
+/// `defaults read`, and it is copied into every backup. Items are generic
+/// passwords under this app's service name, readable only after first unlock
+/// and never synced to another device.
+enum SecretStore {
+
+    enum Secret: String, CaseIterable, Sendable {
+        /// The raw values are the UserDefaults keys older builds used, so
+        /// migration knows where to look.
+        case anthropic = "anthropicKey"
+        case elevenLabs = "elevenLabsKey"
+
+        var label: String {
+            switch self {
+            case .anthropic: "WindowPet Anthropic API key"
+            case .elevenLabs: "WindowPet ElevenLabs API key"
+            }
+        }
+    }
+
+    static var service: String {
+        Bundle.main.bundleIdentifier ?? "com.funproject.windowpet"
+    }
+
+    /// Keys are read on every request and on every menu refresh; one Keychain
+    /// lookup per launch is enough, and writes go through here too.
+    private struct Cache: Sendable {
+        var values: [Secret: String] = [:]
+        var loaded: Set<Secret> = []
+    }
+    private static let cache = OSAllocatedUnfairLock(initialState: Cache())
+
+    private static func query(_ secret: Secret) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: service,
+         kSecAttrAccount as String: secret.rawValue]
+    }
+
+    /// The stored key, or nil when there is none.
+    static func read(_ secret: Secret) -> String? {
+        let cached: String?? = cache.withLock { state -> String?? in
+            state.loaded.contains(secret) ? .some(state.values[secret]) : .none
+        }
+        if let hit = cached { return hit }
+        var lookup = query(secret)
+        lookup[kSecReturnData as String] = true
+        lookup[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(lookup as CFDictionary, &item)
+        var found: String?
+        if status == errSecSuccess, let data = item as? Data,
+           let text = String(data: data, encoding: .utf8), !text.isEmpty {
+            found = text
+        }
+        let value = found
+        // A locked or unavailable Keychain is not "no key": leave it
+        // uncached so the next read tries again.
+        if status == errSecSuccess || status == errSecItemNotFound {
+            cache.withLock {
+                $0.loaded.insert(secret)
+                $0.values[secret] = value
+            }
+        }
+        return value
+    }
+
+    /// Saves the key, replacing any earlier one. Returns the Keychain status.
+    @discardableResult
+    static func write(_ value: String, for secret: Secret) -> OSStatus {
+        let data = Data(value.utf8)
+        var status = SecItemUpdate(query(secret) as CFDictionary,
+                                   [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var add = query(secret)
+            add[kSecValueData as String] = data
+            add[kSecAttrLabel as String] = secret.label
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            status = SecItemAdd(add as CFDictionary, nil)
+            if status == errSecParam {
+                // Some keychains reject the accessibility class; the item is
+                // still local-only without it.
+                add.removeValue(forKey: kSecAttrAccessible as String)
+                status = SecItemAdd(add as CFDictionary, nil)
+            }
+        }
+        if status == errSecSuccess {
+            cache.withLock {
+                $0.loaded.insert(secret)
+                $0.values[secret] = value
+            }
+        }
+        return status
+    }
+
+    static func remove(_ secret: Secret) {
+        SecItemDelete(query(secret) as CFDictionary)
+        cache.withLock {
+            $0.loaded.insert(secret)
+            $0.values[secret] = nil
+        }
+        // Never leave a plaintext copy behind either.
+        UserDefaults.standard.removeObject(forKey: secret.rawValue)
+    }
+
+    /// Moves keys an older build left in UserDefaults into the Keychain, then
+    /// deletes the plaintext copy. A copy is only deleted once the Keychain
+    /// holds it, so a refused write never loses the user's key.
+    static func migrateFromDefaults() {
+        let defaults = UserDefaults.standard
+        for secret in Secret.allCases {
+            guard let legacy = defaults.string(forKey: secret.rawValue) else { continue }
+            let value = legacy.trimmingCharacters(in: .whitespacesAndNewlines)
+            if value.isEmpty || write(value, for: secret) == errSecSuccess {
+                defaults.removeObject(forKey: secret.rawValue)
+            }
+        }
+    }
+
+    static func describe(_ status: OSStatus) -> String {
+        let message = SecCopyErrorMessageString(status, nil) as String?
+        return message.map { "\($0), \(status)" } ?? "status \(status)"
+    }
 }
