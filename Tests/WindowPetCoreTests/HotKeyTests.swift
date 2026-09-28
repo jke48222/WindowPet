@@ -59,6 +59,19 @@ final class HotKeyTests: XCTestCase {
         }
     }
 
+    func testSystemEditingShortcutsCannotBeTaken() {
+        // Bound globally, Command-V would stop paste in every app.
+        for name in ["c", "v", "x", "z", "a", "space"] {
+            let binding = HotKeyBinding(keyCode: KeyCodes.byName[name]!, modifiers: .command)
+            XCTAssertFalse(binding.isValid, "\(binding.displayName) should be refused")
+            XCTAssertEqual(binding.problem, "\(binding.displayName) belongs to macOS")
+        }
+        // Only the bare Command form is reserved.
+        XCTAssertTrue(HotKeyBinding(keyCode: KeyCodes.byName["space"]!, modifiers: .option).isValid)
+        XCTAssertTrue(HotKeyBinding(keyCode: KeyCodes.byName["v"]!,
+                                    modifiers: [.command, .shift]).isValid)
+    }
+
     func testKeyTableIsSharedWithPressKeys() {
         // The press_keys tool and the summon shortcut read the same table, so
         // a code fixed in one place is fixed in both.

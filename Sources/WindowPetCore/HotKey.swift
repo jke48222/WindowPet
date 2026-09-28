@@ -80,17 +80,37 @@ public struct HotKeyBinding: Equatable, Sendable {
 
     public static let `default` = HotKeyBinding(keyCode: 49, modifiers: .option)
 
-    /// A global shortcut needs at least one modifier, or it would swallow a
-    /// plain keystroke everywhere. Command-Q and friends stay off limits so
-    /// the binding cannot shadow quitting an app.
-    public var isValid: Bool {
-        guard !modifiers.isEmpty, KeyCodes.name(for: keyCode) != nil else { return false }
+    /// A global shortcut needs Command, Control or Option, or it would
+    /// swallow ordinary typing everywhere: no modifier eats the key itself,
+    /// and Shift alone eats its capital (Shift-A) or symbol. Command-Q and
+    /// friends stay off limits so the binding cannot shadow quitting an app.
+    public var isValid: Bool { problem == nil }
+
+    /// Why this binding cannot be used, in words the recorder can show, or
+    /// nil when it is fine.
+    public var problem: String? {
+        guard KeyCodes.name(for: keyCode) != nil else { return "That key can't be used" }
+        guard !modifiers.subtracting(.shift).isEmpty else {
+            return "Add Option, Control or Command"
+        }
+        return isReserved ? "\(displayName) belongs to macOS" : nil
+    }
+
+    private var isReserved: Bool {
         let reserved: [(UInt16, HotKeyModifiers)] = [
             (KeyCodes.byName["q"]!, .command),
             (KeyCodes.byName["w"]!, .command),
             (KeyCodes.byName["tab"]!, .command),
+            // Clipboard, undo and select all: bound globally, they would stop
+            // working in every app. Command-Space opens Spotlight.
+            (KeyCodes.byName["c"]!, .command),
+            (KeyCodes.byName["v"]!, .command),
+            (KeyCodes.byName["x"]!, .command),
+            (KeyCodes.byName["z"]!, .command),
+            (KeyCodes.byName["a"]!, .command),
+            (KeyCodes.byName["space"]!, .command),
         ]
-        return !reserved.contains { $0.0 == keyCode && modifiers == $0.1 }
+        return reserved.contains { $0.0 == keyCode && modifiers == $0.1 }
     }
 
     public var displayName: String {
