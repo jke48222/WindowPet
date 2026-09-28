@@ -75,18 +75,29 @@ final class WorldModel {
         }
     }
 
-    /// The exposed segment the pet occupies while walking, nil if it vanished.
-    func segment(of kind: Platform.Kind, atX x: CGFloat) -> Platform? {
-        platforms.first { $0.kind == kind && $0.minX - 2 <= x && x <= $0.maxX + 2 }
+    /// The exposed segment the pet occupies while walking at `point`, nil if
+    /// it vanished. Every display has a floor of kind `.floor`, so a floor is
+    /// identified by the point as well: the one under him, not the first
+    /// display whose x range matches.
+    func segment(of kind: Platform.Kind, at point: CGPoint) -> Platform? {
+        if kind == .floor { return floorPlatform(under: point) }
+        return platforms.first { $0.kind == kind && $0.minX - 2 <= point.x && point.x <= $0.maxX + 2 }
     }
 
-    /// Floor under horizontal position x: the screen containing it, else the
-    /// nearest — the pet always has ground somewhere.
-    func floorPlatform(atX x: CGFloat) -> Platform {
-        let f = floors.first { $0.minX <= x && x <= $0.maxX }
-            ?? floors.min { abs($0.midX - x) < abs($1.midX - x) }
-            ?? CGRect(x: 0, y: 0, width: 1512, height: 982)
+    /// The floor under `point`: the highest display floor at or below it
+    /// among those spanning its x, else the nearest. Displays stacked one
+    /// above another share x ranges, so x alone picks the wrong display.
+    /// The pet always has ground somewhere.
+    func floorPlatform(under point: CGPoint) -> Platform {
+        let f = floorRect(under: point)
         return Platform(kind: .floor, topY: f.minY, minX: f.minX, maxX: f.maxX)
+    }
+
+    /// The usable area of the display whose floor is under `point`. Wall
+    /// heights come from this rect, the floor's own display.
+    func floorRect(under point: CGPoint) -> CGRect {
+        DisplayGeometry.floorIndex(under: point, floors: floors).map { floors[$0] }
+            ?? CGRect(x: 0, y: 0, width: 1512, height: 982)
     }
 
     /// The frontmost window when it's maximized-or-larger (≥90% of its

@@ -2,9 +2,9 @@ import AppKit
 import QuartzCore
 import WindowPetCore
 
-/// Stage-2 brain, complete: the pet is a physical creature in a world made of
-/// window tops, screen floors, and screen-edge walls. Hardcoded FSM (GOBT is
-/// S4):
+/// The pet is a physical creature in a world made of window tops, screen
+/// floors, and screen-edge walls. Its body is this hand-written state machine;
+/// choosing where to go next is BehaviorBrain and Planner's job:
 ///
 ///   falling ─lands→ landing ─→ standing ─timer→ walking ─edge→ climbing
 ///      ↑                          │ closed/minimized/occluded    │ leap-off
@@ -111,6 +111,24 @@ final class PetEngine: NSObject {
     var celebrationHops = 0
     var lastUserInputAt: TimeInterval = 0
     var userAway = false
+    /// The system idle clock at the previous presence sample.
+    var lastIdleSample: TimeInterval = 0
+    /// Wall-clock moment of the last suspend, and the idle clock then. Nothing
+    /// samples presence while locked or asleep (the watch timer is off), and
+    /// unlocking is itself input, so the time away is worked out on resume.
+    /// Wall clock, because the media clock stops while the Mac sleeps.
+    var suspendedAtWall: Date?
+    var idleAtSuspend: TimeInterval = 0
+    /// A return greeting that came due while he could not act on it (still
+    /// dropping in after a resume). It plays when he next lands, if soon.
+    var pendingGreeting: (away: TimeInterval, at: TimeInterval)?
+    /// Bumped by every fresh spawn and by suspend, so a delayed spawn retry
+    /// from an earlier wake cannot fire after the Mac locked again or after
+    /// a newer spawn already placed him.
+    var spawnGeneration = 0
+    /// System Settings > Accessibility > Display > Reduce motion. While on,
+    /// Rusty makes no large motion on his own initiative (see MotionPolicy).
+    var reduceMotion = false
     var paceDir: CGFloat = 1
     var nextPaceAt: TimeInterval = 0
     var lastAgitationTravelAt: TimeInterval = 0
@@ -160,11 +178,12 @@ final class PetEngine: NSObject {
     // MARK: - Lifecycle
 
     func start() {
-        let l = stage.displayLinkSourceView.displayLink(target: self, selector: #selector(stepLink(_:)))
-        l.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 60, preferred: 60)
-        l.add(to: .main, forMode: .common)
-        l.isPaused = true
-        link = l
+        bindDisplayLink()
+        // A display change replaces every overlay view. A view display link
+        // only fires while its view is in an on-screen window, so the link
+        // must move to the new view or Rusty freezes wherever he was.
+        stage.onPanelsRebuilt = { [weak self] in self?.displaysChanged() }
+        observeReduceMotion()
 
         if tier2.enableIfTrusted() {
             log("tier 2 enabled (Accessibility trusted)")
@@ -229,59 +248,133 @@ final class PetEngine: NSObject {
                 }
             }
         }
-        ws.addObserver(forName: NSWorkspace.willSleepNotification,
-                       object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.suspend() }
-        }
-        ws.addObserver(forName: NSWorkspace.didWakeNotification,
-                       object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.resume() }
-        }
-        let dnc = DistributedNotificationCenter.default()
-        dnc.addObserver(forName: Notification.Name("com.apple.screenIsLocked"),
-                        object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.suspend() }
-        }
-        dnc.addObserver(forName: Notification.Name("com.apple.screenIsUnlocked"),
-                        object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.resume() }
-        }
+        // Sleep and the lock screen are tracked in one place. Waking is not
+        // unlocking: ScreenLock resumes only once the Mac is both awake and
+        // unlocked, so nothing respawns behind the lock screen.
+        ScreenLock.shared.observe(suspend: { [weak self] in self?.suspend() },
+                                  resume: { [weak self] in self?.resume() })
 
+        // ScreenLock reports transitions only. Launched behind the lock
+        // screen (a login item after a restart, a relaunch), no suspend would
+        // ever arrive, so start suspended and let the unlock spawn him.
+        if ScreenLock.shared.isSuspended {
+            suspend()
+            return
+        }
         startAmbientTimer()
         spawn()
         retuneWatchTimer(force: true)
     }
 
     func spawn(attempt: Int = 0) {
+        if attempt == 0 { spawnGeneration += 1 }
+        let generation = spawnGeneration
         let now = CACurrentMediaTime()
         world.refresh(now: now)
-        let screenTop = stage.clampTop(forAnchor: CGPoint(
-            x: NSScreen.screens.first?.frame.midX ?? 700,
-            y: (NSScreen.screens.first?.frame.midY ?? 500))) - Self.petSize.height
         if let win = world.frontTopWindow(forcePID: debugForcePID, allowOwn: allowOwnWindows) {
             let perch = Geometry.initialPerch(windowWidth: win.frame.width,
                                               petWidth: Self.petSize.width)
-            anchor = CGPoint(x: win.frame.minX + perch + Self.petSize.width / 2,
-                             y: min(win.frame.maxY + 260, screenTop))
+            let x = win.frame.minX + perch + Self.petSize.width / 2
+            // Drop in from under the menu bar of the display that holds the
+            // window (not the primary's, which on a display arranged above
+            // it would start him below the window), and never from below
+            // the title bar he is meant to land on.
+            let screenTop = stage.clampTop(forAnchor: CGPoint(x: x, y: win.frame.maxY - 1))
+                - Self.petSize.height
+            anchor = CGPoint(x: x, y: max(min(win.frame.maxY + 260, screenTop), win.frame.maxY))
         } else if attempt < 2 {
             // The window server registers windows asynchronously; at login or
             // right after launch the front app's windows may not be listed
             // yet. Wait a beat rather than defaulting to the floor.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                self?.spawn(attempt: attempt + 1)
+                // Locked or asleep again since, or superseded by a newer
+                // spawn: dropping in now would leave him falling behind a
+                // hidden stage that the next resume would never show.
+                guard let self, generation == self.spawnGeneration,
+                      self.stateName != "suspended", !ScreenLock.shared.isSuspended
+                else { return }
+                self.spawn(attempt: attempt + 1)
             }
             return
         } else {
-            let f = world.floorPlatform(atX: NSScreen.screens.first?.frame.midX ?? 700)
-            anchor = CGPoint(x: (f.minX + f.maxX) / 2, y: screenTop)
+            let primary = NSScreen.screens.first?.frame ?? CGRect(x: 0, y: 0, width: 1512, height: 982)
+            let screenTop = stage.clampTop(forAnchor: CGPoint(x: primary.midX, y: primary.midY))
+                - Self.petSize.height
+            let f = world.floorPlatform(under: CGPoint(x: primary.midX, y: screenTop))
+            anchor = CGPoint(x: (f.minX + f.maxX) / 2, y: max(screenTop, f.topY))
         }
         enterFalling(vy: 0, at: now)
         applyAnchor()
     }
 
+    /// Creates the frame clock from the stage's current primary view,
+    /// replacing any earlier one. The paused state and frame rate carry over,
+    /// so a pet mid-fall keeps falling and a settled one stays at zero cost.
+    func bindDisplayLink() {
+        let old = link
+        let paused = old?.isPaused ?? true
+        let range = old?.preferredFrameRateRange
+            ?? CAFrameRateRange(minimum: 15, maximum: 60, preferred: 60)
+        old?.invalidate() // also lets go of the orphaned view it held
+        let l = stage.displayLinkSourceView.displayLink(target: self, selector: #selector(stepLink(_:)))
+        l.preferredFrameRateRange = range
+        l.add(to: .main, forMode: .common)
+        l.isPaused = paused
+        if !paused { lastStepAt = CACurrentMediaTime() }
+        link = l
+    }
+
+    /// Displays were plugged, unplugged, rearranged or rescaled, and the
+    /// stage has rebuilt its panels: rebind the clock and re-read the floors.
+    func displaysChanged() {
+        bindDisplayLink()
+        // Displays often drop and return while the Mac is locked or asleep.
+        // The new link stays paused and nothing else wakes up; resume()
+        // refreshes the world and restarts the timers.
+        if case .suspended = state {
+            log("displays changed while suspended — display link rebound")
+            return
+        }
+        let now = CACurrentMediaTime()
+        world.refresh(now: now)
+        log("displays changed — display link rebound")
+        // If the floor he stands on moved or went away with its display, he
+        // drops onto whatever is below now. A floor that is still there (the
+        // usual case) leaves him, and a nap, undisturbed.
+        switch state {
+        case .standing(.floor, _), .walking(.floor, _, _, _), .landing(.floor, _, _):
+            let f = world.floorPlatform(under: anchor)
+            if abs(f.topY - anchor.y) > 0.5 || anchor.x < f.minX || anchor.x > f.maxX {
+                enterFalling(vy: 0, at: now)
+            }
+        default:
+            break
+        }
+        retuneWatchTimer(force: true)
+    }
+
+    /// Follows System Settings > Accessibility > Display > Reduce motion,
+    /// now and whenever it changes.
+    func observeReduceMotion() {
+        reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                self.log("reduce motion \(self.reduceMotion ? "on" : "off")")
+            }
+        }
+    }
+
     func suspend() {
         guard stateName != "suspended" else { return }
         state = .suspended
+        spawnGeneration += 1 // cancels a spawn retry still waiting to run
+        suspendedAtWall = Date()
+        idleAtSuspend = Self.systemIdleSeconds()
+        pendingGreeting = nil
         link?.isPaused = true
         watchTimer?.cancel(); watchTimer = nil; watchInterval = -1
         ambientTimer?.cancel(); ambientTimer = nil
@@ -290,8 +383,14 @@ final class PetEngine: NSObject {
     }
 
     func resume() {
+        guard !ScreenLock.shared.isSuspended else { return }
         guard case .suspended = state else { return }
         log("resumed — respawning")
+        notePresenceAcrossSuspend()
+        // Out of .suspended before spawning: a spawn that has to wait for the
+        // front app's windows must not leave the engine looking suspended,
+        // or a lock in that gap would skip suspend() and never hide again.
+        state = .falling(vy: 0)
         stage.showAll()
         startAmbientTimer()
         spawn()
@@ -416,6 +515,15 @@ final class PetEngine: NSObject {
         stage.setPose(rotationDegrees: standRotation(at: anchor), facing: stage.facing)
         standingStatus(ref)
         log("→ standing on \(ref)")
+        // A welcome back that arrived while he was still dropping in after
+        // an unlock plays now that he has somewhere to stand.
+        if let pending = pendingGreeting {
+            pendingGreeting = nil
+            if now - pending.at <= Self.pendingGreetingWindow {
+                greet(afterAway: pending.away)
+                if case .standing = state {} else { return }
+            }
+        }
         if climbedRecently {
             climbedRecently = false
             brain.applyEvent(.climbed)
@@ -463,7 +571,7 @@ final class PetEngine: NSObject {
     }
 
     func beginClimb(side: CGFloat, targetY: CGFloat, at now: TimeInterval) {
-        let f = world.floorPlatform(atX: anchor.x)
+        let f = world.floorPlatform(under: anchor)
         // The rotated body's feet-side inset is ~4pt: put the visible feet
         // exactly on the screen edge.
         anchor.x = side < 0 ? f.minX + 4 : f.maxX - 4
@@ -497,7 +605,7 @@ final class PetEngine: NSObject {
             // Stay over the floor while falling: a step-off past the screen
             // edge (x beyond the floor span) would otherwise miss the floor
             // and sink below the screen before the failsafe caught it.
-            let f = world.floorPlatform(atX: anchor.x)
+            let f = world.floorPlatform(under: anchor)
             anchor.x = min(max(anchor.x, f.minX + Self.bodyHalfWidth),
                            f.maxX - Self.bodyHalfWidth)
             var s = PetPhysics.fallStep(y: anchor.y, vy: vy, dt: dt)
@@ -506,7 +614,7 @@ final class PetEngine: NSObject {
                                                  fromY: anchor.y, toY: s.y) {
                 land(on: hit, at: now)
             } else if s.y < (world.floors.map(\.minY).min() ?? 0) - 40 {
-                let f = world.floorPlatform(atX: anchor.x)
+                let f = world.floorPlatform(under: CGPoint(x: anchor.x, y: s.y))
                 anchor.x = min(max(anchor.x, f.minX + 4), f.maxX - 4)
                 anchor.y = f.topY + 1
                 land(on: f, at: now)
@@ -519,15 +627,16 @@ final class PetEngine: NSObject {
 
         case .leaping(let vx, let vy, let endAt):
             world.refreshIfStale(now: now, maxAge: 0.12)
-            let f = world.floorPlatform(atX: anchor.x)
-            var newVx = vx
-            var x = anchor.x + vx * dt
-            let wallMargin = Self.bodyHalfWidth
-            if x < f.minX + wallMargin { x = f.minX + wallMargin; newVx = 0 } // thud
-            if x > f.maxX - wallMargin { x = f.maxX - wallMargin; newVx = 0 }
-            anchor.x = x
+            // Height first, so the wall test below is made where he will be.
             var s = PetPhysics.fallStep(y: anchor.y, vy: vy, dt: dt)
             s = ceilingClamp(s) // throws bonk on the menu-bar line, never exit the top
+            // Walls are the desktop's outer edges, not the edges of the
+            // display he took off from: a leap aimed at a window on the
+            // display beside or above this one carries on into it.
+            let step = stage.airborneX(from: anchor.x, to: anchor.x + vx * dt, atY: s.y,
+                                       margin: Self.bodyHalfWidth)
+            let newVx = step.hitWall ? 0 : vx // thud
+            anchor.x = step.x
             if s.vy < 0 {
                 clock.play(.fall, from: sprites, at: now).map(stage.show)
                 if let hit = Terrain.landingPlatform(in: world.platforms, x: anchor.x,
@@ -588,8 +697,10 @@ final class PetEngine: NSObject {
     func ceilingClamp(_ s: (y: CGFloat, vy: CGFloat)) -> (y: CGFloat, vy: CGFloat) {
         // Anchor may reach the menu-bar/notch line itself — landings there
         // become ceiling hangs (body below the line), and the render layer
-        // keeps upright transients pushed fully on-screen.
-        let maxY = stage.clampTop(forAnchor: anchor)
+        // keeps upright transients pushed fully on-screen. A menu bar with
+        // a display arranged above it is not a ceiling: the arc carries on
+        // up to the top display's own menu bar.
+        let maxY = stage.airborneCeiling(above: anchor)
         if s.y > maxY { return (maxY, min(s.vy, 0)) }
         return s
     }
@@ -633,12 +744,14 @@ final class PetEngine: NSObject {
             kind = .window(id)
             lastWindowFrame = frame
         case .floor:
-            let f = world.floorPlatform(atX: anchor.x)
+            // The floor he is on, found by where he stands: displays stacked
+            // one above another share x ranges.
+            let f = world.floorPlatform(under: anchor)
             topY = f.topY
             kind = .floor
         }
         world.refreshIfStale(now: now, maxAge: ref == .floor ? 1.0 : 0.25)
-        guard let seg = world.segment(of: kind, atX: anchor.x) else {
+        guard let seg = world.segment(of: kind, at: CGPoint(x: anchor.x, y: topY)) else {
             enterFalling(vy: 0, at: now)
             return
         }
@@ -661,15 +774,18 @@ final class PetEngine: NSObject {
         if x <= lo || x >= hi {
             if ref == .floor {
                 // Floor edges are screen edges: sometimes climb the wall.
-                if autonomy && travelPlan.isEmpty && targetX == nil && CGFloat.random(in: 0...1) < 0.5 {
-                    let f = world.floorPlatform(atX: anchor.x)
-                    let h = (NSScreen.screens.first { $0.visibleFrame.minY == f.topY }?
-                        .visibleFrame.height) ?? 800
+                if autonomy && travelPlan.isEmpty && targetX == nil
+                    && MotionPolicy.allows(.climb, reduceMotion: reduceMotion)
+                    && CGFloat.random(in: 0...1) < 0.5 {
+                    // The wall is as tall as this floor's own display.
+                    let floor = world.floorRect(under: anchor)
                     beginClimb(side: dir < 0 ? -1 : 1,
-                               targetY: f.topY + h * .random(in: 0.3...0.72), at: now)
+                               targetY: floor.minY + floor.height * .random(in: 0.3...0.72),
+                               at: now)
                     return
                 }
             } else if autonomy && travelPlan.isEmpty && targetX == nil
+                        && MotionPolicy.allows(.stepOff, reduceMotion: reduceMotion)
                         && CGFloat.random(in: 0...1) < 0.30 {
                 anchor.x = x + dir * 10 // stroll right off the edge
                 enterFalling(vy: 0, at: now)
@@ -719,6 +835,7 @@ final class PetEngine: NSObject {
             // exhausting to share a screen with. It follows an app switch at
             // most every couple of minutes, and only when it actually cares.
             if autonomy, !isSleeping, !immersionActive, !focusCalm,
+               MotionPolicy.allows(.travel, reduceMotion: reduceMotion),
                travelPlan.isEmpty, pendingNapAtX == nil,
                now - lastActivationLeapAt > 120,
                brain.needs.attention > 0.45 || brain.needs.curiosity > 0.65 {
@@ -794,7 +911,7 @@ final class PetEngine: NSObject {
             } else if now - offscreenSince > 2.5 {
                 offscreenSince = 0
                 log("visibility watchdog: relocating from \(fmt(anchor))")
-                let f = world.floorPlatform(atX: anchor.x)
+                let f = world.floorPlatform(under: anchor)
                 anchor.x = min(max(anchor.x, f.minX + 60), f.maxX - 60)
                 anchor.y = min(anchor.y, f.topY + 400)
                 enterFalling(vy: 0, at: now)
@@ -867,6 +984,9 @@ final class PetEngine: NSObject {
     }
 
     func retuneWatchTimer(force: Bool = false) {
+        // Suspended costs nothing: suspend() cancelled the timer and only
+        // resume() may start it again, whoever else asks for a retune.
+        if case .suspended = state { return }
         let now = CACurrentMediaTime()
         let interval: TimeInterval
         if displayLinkActive {

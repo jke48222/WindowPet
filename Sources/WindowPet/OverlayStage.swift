@@ -1,5 +1,6 @@
 import AppKit
 import QuartzCore
+import WindowPetCore
 
 /// The pet's presentation layer, rebuilt for stage 2: one screen-sized
 /// overlay panel per display (same recipe — floating, all-Spaces,
@@ -22,6 +23,9 @@ final class OverlayStage {
     /// Highest y the sprite may reach per screen: below the menu bar AND the
     /// notch band (which macOS paints black over everything in fullscreen).
     private var screenClampTops: [CGFloat] = []
+    /// Usable area per screen (visibleFrame): its sides are the walls an
+    /// airborne pet thuds against when no display continues beyond them.
+    private var screenUsable: [CGRect] = []
     private let sprite = CALayer()
     private let bubble = CALayer()
     private let bubbleText = CATextLayer()
@@ -60,6 +64,12 @@ final class OverlayStage {
     }
     private var effectiveFacing: CGFloat { facing * facingSign }
     private var holeOpen = false
+    /// The panel the hole's mouse flags were last written for. Rusty can
+    /// change display while the hole is open (always, when dragged across),
+    /// and the flags must follow him.
+    private var holeAppliedIndex: Int?
+    /// True while the engine holds the hole open for a grab in flight.
+    private(set) var holeForcedOpen = false
     private var hidden = false
 
     // Engine hooks (points are in global AppKit coordinates).
@@ -71,6 +81,10 @@ final class OverlayStage {
     /// physical act of consent, so these are read without a confirmation the
     /// way the gated read_file tool needs one.
     var onFilesDropped: (([URL]) -> Void)?
+    /// Called after a display change replaced every panel and view. Anything
+    /// bound to the old views (the engine's display link) must rebind to
+    /// `displayLinkSourceView`, or it stops firing for good.
+    var onPanelsRebuilt: (() -> Void)?
 
     init() {
         sprite.bounds = CGRect(origin: .zero, size: spriteSize)
@@ -107,11 +121,13 @@ final class OverlayStage {
         panels = []
         views = []
         screenFrames = NSScreen.screens.map(\.frame)
+        screenUsable = NSScreen.screens.map(\.visibleFrame)
         screenClampTops = NSScreen.screens.map {
             min($0.visibleFrame.maxY, $0.frame.maxY - $0.safeAreaInsets.top)
         }
         if screenFrames.isEmpty {
             screenFrames = [CGRect(x: 0, y: 0, width: 1512, height: 982)]
+            screenUsable = [CGRect(x: 0, y: 0, width: 1512, height: 944)]
             screenClampTops = [944]
         }
         for frame in screenFrames {
@@ -125,7 +141,17 @@ final class OverlayStage {
         currentPanelIndex = min(currentPanelIndex, panels.count - 1)
         views[currentPanelIndex].layer?.addSublayer(sprite)
         views[currentPanelIndex].layer?.addSublayer(bubble)
+        // The lamp went with the old view; bring it back if a watch is live.
+        watchLamp.removeFromSuperlayer()
+        if watchLampVisible {
+            views[currentPanelIndex].layer?.addSublayer(watchLamp)
+        }
+        // New panels start click-through; whatever the hole was, it must be
+        // written again for these panels.
+        holeAppliedIndex = nil
+        applyHoleFlags()
         place(anchor: anchor)
+        onPanelsRebuilt?()
     }
 
     /// The display link should tick with the primary display.
@@ -150,6 +176,23 @@ final class OverlayStage {
         let idx = screenFrames.firstIndex { $0.contains(a) }
             ?? min(currentPanelIndex, max(0, screenClampTops.count - 1))
         return screenClampTops.indices.contains(idx) ? screenClampTops[idx] : 944
+    }
+
+    /// Highest y an airborne anchor may reach: this display's menu-bar line,
+    /// or, when a display is arranged directly above this one at that x, the
+    /// top display's. Arcs carry on into a display above instead of bonking
+    /// on the lower one's menu bar.
+    func airborneCeiling(above a: CGPoint) -> CGFloat {
+        DisplayGeometry.ceiling(above: a, regions: screenFrames, clampTops: screenClampTops)
+    }
+
+    /// One frame of horizontal airborne motion across the whole desktop:
+    /// free across a shared edge into the neighbouring display, a thud only
+    /// at an outer wall.
+    func airborneX(from x: CGFloat, to proposed: CGFloat, atY y: CGFloat,
+                   margin: CGFloat) -> (x: CGFloat, hitWall: Bool) {
+        DisplayGeometry.airborneX(from: x, to: proposed, atY: y, margin: margin,
+                                  regions: screenFrames, walls: screenUsable)
     }
 
     /// Where the sprite is actually drawn: the physics center, pushed down
@@ -185,6 +228,10 @@ final class OverlayStage {
             views[idx].layer?.addSublayer(watchLamp)
             CATransaction.commit()
             currentPanelIndex = idx
+            // He changed display with the hole open: move the hole with him
+            // now, not when it next closes and reopens. A drag in flight
+            // keeps its panel until release (see HolePolicy).
+            if holeOpen && !holeForcedOpen { applyHoleFlags() }
         }
         let center = displayedCenter(for: a)
         let origin = panels[currentPanelIndex].frame.origin
@@ -251,12 +298,24 @@ final class OverlayStage {
     /// screen top). Follows him while visible; auto-hides.
     func say(_ text: String, for seconds: TimeInterval = 4) {
         debugBubbleText = text
-        let attr = NSAttributedString(string: text, attributes: [
+        let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13, weight: .medium),
             .foregroundColor: SkinTheme.current.bubbleTextColor,
-        ])
+        ]
         let maxW: CGFloat = 252
-        let bounds = attr.boundingRect(with: CGSize(width: maxW, height: 220),
+        let maxH: CGFloat = 220
+        let measure: (String) -> CGFloat = { s in
+            NSAttributedString(string: s, attributes: attributes)
+                .boundingRect(with: CGSize(width: maxW, height: .greatestFiniteMagnitude),
+                              options: [.usesLineFragmentOrigin])
+                .height.rounded(.up)
+        }
+        // Too tall for the bubble: keep the end, not the beginning. A live
+        // transcript grows at its tail, and the newest words are the ones
+        // the user needs to see.
+        let shown = BubbleFit.tail(of: text, maxHeight: maxH, height: measure)
+        let attr = NSAttributedString(string: shown, attributes: attributes)
+        let bounds = attr.boundingRect(with: CGSize(width: maxW, height: maxH),
                                        options: [.usesLineFragmentOrigin])
         let w = min(maxW, bounds.width.rounded(.up)) + 24
         let h = bounds.height.rounded(.up) + 18
@@ -400,13 +459,27 @@ final class OverlayStage {
     @discardableResult
     func updateHole(mouse: CGPoint, forceOpen: Bool) -> Bool {
         let open = forceOpen || hit(mouse)
-        if open != holeOpen {
-            holeOpen = open
-            for (i, panel) in panels.enumerated() {
-                panel.ignoresMouseEvents = !(open && i == currentPanelIndex)
-            }
+        holeForcedOpen = forceOpen
+        let wasOpen = holeOpen
+        holeOpen = open
+        if HolePolicy.needsReapply(open: open, appliedOpen: wasOpen,
+                                   currentIndex: currentPanelIndex,
+                                   appliedIndex: holeAppliedIndex,
+                                   grabInFlight: forceOpen) {
+            applyHoleFlags()
         }
         return open
+    }
+
+    /// Writes every panel's mouse flag for the current hole state: only the
+    /// panel drawing Rusty may accept events, and only while the hole is open.
+    private func applyHoleFlags() {
+        let flags = HolePolicy.ignoresMouseEvents(open: holeOpen, currentIndex: currentPanelIndex,
+                                                  count: panels.count)
+        for (panel, ignores) in zip(panels, flags) where panel.ignoresMouseEvents != ignores {
+            panel.ignoresMouseEvents = ignores
+        }
+        holeAppliedIndex = currentPanelIndex
     }
 
     var holeIsOpen: Bool { holeOpen }
@@ -437,8 +510,10 @@ final class PetView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let stage, let w = window else { return nil }
         let g = CGPoint(x: w.frame.origin.x + point.x, y: w.frame.origin.y + point.y)
-        // While a drag is in flight the hole is forced open; keep receiving.
-        return stage.hit(g) || stage.holeIsOpen ? self : nil
+        // While a grab is in flight the hole is forced open; keep receiving.
+        // Only then: an open hole alone must not make the whole screen-sized
+        // view swallow clicks that are not on Rusty.
+        return stage.hit(g) || stage.holeForcedOpen ? self : nil
     }
 
     override func mouseDown(with event: NSEvent) {

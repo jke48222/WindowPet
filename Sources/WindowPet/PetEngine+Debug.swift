@@ -51,7 +51,7 @@ extension PetEngine {
     func debugTeleportToFloor() {
         let now = CACurrentMediaTime()
         world.refresh(now: now)
-        let f = world.floorPlatform(atX: anchor.x)
+        let f = world.floorPlatform(under: anchor)
         place(at: CGPoint(x: (f.minX + f.maxX) / 2, y: f.topY + 140))
         enterFalling(vy: 0, at: now)
     }
