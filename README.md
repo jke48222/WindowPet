@@ -149,11 +149,14 @@ rather than in a chat box:
   once by the system, because password managers mark their pasteboard entries concealed, and once by
   [`ClipPolicy`](Sources/WindowPetCore/ClipPolicy.swift), which drops anything shaped like a key or
   a token.
-- **You can drop a file on him.** Text and PDFs are read into the conversation; anything else is
-  named honestly rather than pretended at.
-- **He speaks MCP.** Servers declared in `mcp.json` are spawned at launch, and their tools join the
-  same schema and the same confirmation gate as the built-in verbs. Abilities stop being a list
-  somebody has to recompile.
+- **You can drop a file on him.** With an Anthropic key, text and PDFs are read into the
+  conversation; anything else is named honestly rather than pretended at. Without a key he says
+  that reading files needs the Claude brain and reads nothing.
+- **He speaks MCP.** Servers declared in `mcp.json` join the same schema and the same confirmation
+  gate as the built-in verbs, so abilities stop being a list somebody has to recompile. A server
+  runs only after you approve its exact command line once; an entry that is added or edited later
+  asks again. Servers start without inheriting your API keys or the app's privacy permissions, and
+  the sample file the menu writes starts nothing until you move an entry into `servers`.
 - **He can put the windows back.** An arrangement records where every window was first, at the size
   it actually was, so "put it back" returns a deliberately odd window to its odd size rather than
   tidying it into a half. Session-scoped on purpose: a frame from three days ago is stale, and
@@ -185,7 +188,11 @@ rather than in a chat box:
 ones require confirmation:
 
 - `quitApp` always confirms.
-- `runAppleScript` confirms when the script matches the dangerous-script check.
+- `runAppleScript` runs straight through only for a short allow-list of shapes (volume,
+  notifications, dark mode, Music and Spotify playback), checked by
+  [`AppleScriptPolicy.swift`](Sources/WindowPetCore/AppleScriptPolicy.swift). Every other script
+  confirms. An allow-list rather than a list of dangerous commands, because AppleScript has too
+  many ways to reach a shell for a deny-list to catch them all.
 - `runAdminShell` always confirms, without exception.
 - `readFile` always confirms. A model that can be talked into reading an arbitrary path is a model
   that can be talked into reading a key file, so the tool form stops for a human every time. A file
@@ -193,8 +200,19 @@ ones require confirmation:
   straight into the conversation with the panel showing what was read.
 - An **MCP tool confirms unless its server is marked `"trust": "always"`** in `mcp.json`. Trust is a
   line a person writes in a config file, never a decision the model can take for itself.
+- A **standing ask always confirms**, because it runs the whole agent later with nobody watching.
+- **Outside content raises the bar for the rest of a run.** Once a web page, a file, an MCP result,
+  the screen or the clipboard history is in the conversation, the model may be following text you
+  never wrote. From then on, typing, key presses, copying, opening links or apps, shortcuts,
+  scripts, tricks and searches also confirm, and Rusty can no longer change what he remembers.
 
-Three properties make this hold up:
+The safety row shows the full text that will run, with line breaks and invisible characters spelled
+out. Anything too long to show in full (over 2,000 characters) is refused rather than shown cut off.
+A check waits for a Return typed into the panel, and keystrokes Rusty posts himself are marked and
+dropped. A check raised while you were typing somewhere else asks you to click the panel first, and
+one left for two minutes expires instead of being approved.
+
+Four properties make this hold up:
 
 1. **The agent loop routes through the same gate as typed input.**
    [`AgentSession.swift`](Sources/WindowPet/AgentSession.swift) checks `needsConfirmation` on every
@@ -207,10 +225,11 @@ Three properties make this hold up:
    in front of the user. There is no stored credential and no standing privileged helper. A
    privileged command therefore needs two human checkpoints: the panel confirmation, then the OS
    password prompt.
-3. **It is tested.** 24 tests on the routing layer and 30 on the agent loop, including replays of
-   whole multi-turn conversations from canned API responses, plus end to end checks in the rig
-   asserting that quit, admin and destructive scripts are gated while a harmless script is not, and
-   that an untrusted MCP tool and a `read_file` on an arbitrary path both stop for a human.
+3. **It is tested.** 26 tests on the routing layer and 19 on the agent loop, including replays of
+   whole multi-turn conversations from canned API responses. Further tests feed the script gate the
+   shell escapes it has to catch. End to end checks in the rig assert that quit, admin and
+   destructive scripts are gated while a harmless script is not, and that an untrusted MCP tool and
+   a `read_file` on an arbitrary path both stop for a human.
 4. **There is a spending ceiling.** [`BudgetPolicy.swift`](Sources/WindowPetCore/BudgetPolicy.swift)
    is checked before every model call, including each iteration of the loop, so a plan that keeps
    deciding on one more step stops at the ceiling rather than past it. It defaults to $5 a day and
@@ -236,18 +255,35 @@ question. That needs Screen Recording permission and macOS will prompt for it th
 use it. Both statements are true at once, and stating only the first would be misleading the moment
 somebody launched the app.
 
+## What leaves the Mac
+
+- **Claude.** With an Anthropic key set, Rusty sends Anthropic your request, the recent
+  conversation, remembered facts, a short summary of your windows, and, when a request uses them, a
+  screenshot of the screen, file contents and clipboard text. Without a key nothing is sent, and the
+  local grammar and Apple's on-device model still answer.
+- **Spoken replies** use the on-device macOS voice by default. The optional Microsoft voice
+  (edge-tts) and ElevenLabs send the reply text to those services. Choosing the Microsoft voice
+  asks first, and the ElevenLabs key dialog says what is sent.
+- **"Hey Rusty" is off until you turn it on.** It keeps the microphone open while on, and it only
+  runs on Macs that can recognize speech on the device, so that audio never goes to a server.
+  Dictation has the same rule. Push to talk also stays on the device when it can; on a Mac without
+  the English on-device model it falls back to Apple's speech service, which is why the wake word's
+  refusal note says push to talk still works.
+- **API keys live in the login Keychain**, never in a preferences file. A key saved by an older
+  version is moved there at launch.
+
 ## Results
 
 Every number below has a file or a command behind it.
 
 | Result | Value | How it was measured |
 | --- | --- | --- |
-| Unit tests | **360 passing, 0 failures**, across 22 files | `swift test`, run 2026-08-27 |
+| Unit tests | **439 passing, 0 failures**, across 27 files | `swift test`, run 2026-09-27 |
 | End to end rig | **138 of 138**, seven parts | `--testrig`, run 2026-08-27, caveat below |
 | Idle CPU | **0.24%** of one core, 47.7 MB | [`ENERGY.md`](ENERGY.md), M5 Pro, release build |
 | Perched CPU | **0.42%**, 47.6 MB | Same run |
 | Active CPU | **1.04%**, 48.5 MB | Same run |
-| Source size | 19,091 lines, 105 files | Sources 14,049, Tests 3,376, Tools 1,626, Package.swift 40 |
+| Source size | 25,556 lines, 117 files | Sources 19,274, Tests 4,449, Tools 1,793, Package.swift 40 |
 | Dependencies | zero | `Package.swift` |
 
 ### The energy numbers, and how they were taken
@@ -274,8 +310,8 @@ typed by hand. The method matters more than the figures:
 
 ### The measurement that is not published
 
-The same file records an attempt to measure the wake word listener that came back **inconclusive,
-and is deliberately not published.** Sampling the installed app with the setting on and off gave
+The same file records an attempt to measure the wake word listener. It came back **inconclusive,
+so it is not published.** Sampling the installed app with the setting on and off gave
 overlapping CPU, roughly 0.7 to 2.1 percent either way, with noise dominating at that sample size.
 
 Then the reason turned up. Running the installed binary with `--diag` reported that speech and
@@ -296,10 +332,10 @@ vertical velocity and a duration.
 The interesting part is how it is tested.
 [`PhysicsTests.swift`](Tests/WindowPetCoreTests/PhysicsTests.swift) `testLeapSolutionLandsOnTarget`
 does **not** re-derive the closed form and check the algebra against itself. It takes the solver's
-answer and then **numerically integrates the arc forward using `PetPhysics.fallStep`, the exact
-function the running engine steps every frame**, at a 1/120 second timestep with the final partial
-step clamped, and asserts the creature arrives within 1.5 points on both axes across three targets
-(up and right, down and left, and level).
+answer and **numerically integrates the arc forward using `PetPhysics.fallStep`, the exact function
+the running engine steps every frame**, at a 1/120 second timestep with the final partial step
+clamped. Across three targets (up and right, down and left, and level) the creature must arrive
+within 1.5 points on both axes.
 
 That is a stronger test because it closes the loop between the two pieces that have to agree. A
 closed form check only proves the formula is self consistent. This proves the solver and the engine
@@ -327,17 +363,24 @@ runs in three. It passes consistently when nothing else is compiling. **A failur
 evidence of a regression until it repeats three times.** `Tools/release.sh` encodes exactly that:
 it retries the rig up to three times and requires one clean pass, because what is flaky is the
 failure, never the pass. The same caveat applies to the energy benchmark, which reported a
-hard-budget failure under load and passed with the identical build ninety seconds later. **Treat 93 of 93 as the expected result and planner travel as the part
-that is timing sensitive under load.** The rig is built to wait rather than assert against wall
+hard-budget failure under load and passed with the identical build ninety seconds later. **Treat a
+full pass as the expected result and planner travel as the part that is timing sensitive under
+load.** The rig is built to wait rather than assert against wall
 clock choreography, but that phase has the least slack.
 
 The seven parts: window terrain, floor and touch and climb, Tier 2 accessibility events, the
 behavior planner, reactions, third party sprite pack import, and the assistant surface. The last
 runs entirely offline against real objects, with no API calls.
 
+Four assistant checks were added after the 2026-08-27 runs, so the next full pass should read 142
+of 142. They check that the tool-server sample starts nothing, the dictation shortcut is wired, the
+speech safety net outlasts the longest reply, and the wake word stays off until switched on. The
+rig has not been rerun since they were added.
+
 ## Running it
 
-Requires macOS 14 or newer on Apple silicon and the Swift toolchain from Xcode. There is no package
+Requires macOS 14 or newer and the Swift toolchain from Xcode. The released app is universal, so
+it runs on Apple silicon and Intel Macs. There is no package
 manager step, because there are no dependencies.
 
 ```bash
@@ -351,15 +394,17 @@ Grant Accessibility from that same menu when you want event-driven tracking. The
 for it on its own, and everything works without it.
 
 ```bash
-swift test                          # 360 unit tests, headless, opens no windows
+swift test                          # 439 unit tests, headless, opens no windows
 swift run WindowPet -- --diag 6     # verbose tracking log for 6 seconds, then exits
 swift run WindowPet -- --testrig    # end to end check, opens its own windows, exits 0 or 1
 swift run WindowPet -- --bench 15   # energy benchmark, asserts budgets, exits 0 or 1
 swift run WindowPet -- --ask "..."  # headless: run one prompt through the agent and print
 ```
 
-A successful `swift test` ends with `Executed 360 tests, with 0 failures`. A successful rig run ends
-with `RIG PASS 93/93` and exit code 0.
+A successful `swift test` ends with `Executed 439 tests, with 0 failures`. A successful rig run ends
+with `RIG PASS <n>/<n>` (138 at the last full run, 142 with the checks added since) and exit code 0.
+GitHub Actions runs `swift build -c release` and `swift test` on every push and pull request to
+`main` ([`ci.yml`](.github/workflows/ci.yml)); the rig drives real windows, so it stays a local step.
 
 Build a distributable app:
 
@@ -368,15 +413,22 @@ bash Tools/make-app.sh    # -> build/WindowPet.app
 bash Tools/make-dist.sh   # -> build/WindowPet.dmg, drag to Applications
 ```
 
-Regenerate the sprite sheet, or replace the PNG with real art. The app only loads the PNG, so
-commissioned art drops straight in:
+Regenerate Rusty's frames. PetGen takes an output directory and writes one PNG per skin and
+frame, named `pet_<skin>_<anim>_<n>.png` (for example `pet_sakura_walk_3.png`). It covers the
+`tinplate`, `seafoam`, `midnight` and `sakura` skins and the `idle`, `blink`, `look`, `fidget`,
+`walk`, `jump`, `fall`, `land` and `sleep` animations. It also writes `pet.png`, a preview of the
+first idle frame that the app does not load:
 
 ```bash
-swift run PetGen Sources/WindowPet/Resources/pet.png
+swift run PetGen Sources/WindowPet/Resources
 ```
 
-The assistant needs an Anthropic API key to reach the Claude tier. Without one, the local grammar
-and the on-device model still work.
+To use commissioned art instead, replace a skin's `pet_<skin>_<anim>_<n>.png` files with images of
+the same names and rebuild. If any frame of an animation is missing, that animation shows a plain
+placeholder instead of crashing.
+
+The assistant needs an Anthropic API key to reach the Claude tier. Set it from the menu bar; it is
+stored in your login Keychain. Without one, the local grammar and the on-device model still work.
 
 ## Project layout
 
@@ -392,6 +444,7 @@ Sources/
 │   ├── ReactionPolicy.swift    Exponentially decaying event-rate maths
 │   ├── Tier2Policy.swift       Accessibility health: probation, contradiction, degradation
 │   ├── Assistant.swift         The action verbs, and which ones require confirmation
+│   ├── AppleScriptPolicy.swift The short list of scripts that may run without a Return
 │   ├── ClaudeRouting.swift     Request build and response parse for the Messages API
 │   ├── ClaudeAgent.swift       The tool-use loop and its tool schemas
 │   ├── AgentLoop.swift         When to stop, resend or execute, plus the message array
@@ -411,6 +464,8 @@ Sources/
 │   ├── QuietPolicy.swift       When not to speak, and what to do with it instead
 │   ├── Trick.swift             Learned routines and what may be recorded
 │   ├── ArrangementHistory.swift  Where windows were, so they can go back
+│   ├── DisplayGeometry.swift   Floors, ceilings and walls across several displays
+│   ├── ScreenLockState.swift   Awake and past the lock screen: when listening may resume
 │   └── SkinDefinition.swift    The user-authored JSON skin schema
 ├── WindowPet/              The AppKit application
 │   ├── Tier1.swift             Window list polling. Zero permissions
@@ -439,7 +494,7 @@ Sources/
 │   ├── AssistantExecutor.swift Executing gated actions, including the admin handoff
 │   ├── AssistantBrain.swift    On-device Apple foundation model routing
 │   ├── ClaudeRouter.swift      The cloud tier
-│   ├── VoiceInput.swift        Push to talk, on-device recognition
+│   ├── VoiceInput.swift        Push to talk, on-device recognition when available
 │   ├── WakeWordListener.swift  Opt-in always-on wake word, one audio engine
 │   ├── ScreenCapture.swift     Screen grab for "look at my screen"
 │   ├── Skins.swift             Four built-in finishes
@@ -449,7 +504,7 @@ Sources/
 │   └── App.swift               Delegate, mode parsing, status item
 └── PetGen/                 One-shot sprite generator
 
-Tests/WindowPetCoreTests/   360 tests, all against the pure core
+Tests/WindowPetCoreTests/   439 tests, all against the pure core
 Tools/                      Character design sheets, app and DMG packaging, energy benchmark
 ENERGY.md                   Generated by Tools/energy-bench.sh
 ```
@@ -462,6 +517,11 @@ exactly why `--testrig` exists.
 Rusty, a mid-century tin toy robot: teal body, silver faceplate, cyan LED eyes that go alarm-orange
 while falling and dim to slits when blinking, a chest dial, rivets, and an antenna bobble that sways
 with the walk. Four alternative finishes ship with the app, and skins can be authored as plain JSON.
+
+With Reduce motion turned on (System Settings > Accessibility > Display), Rusty stops wandering,
+travelling between windows, climbing and hopping on his own. He still rides a window you drag,
+falls when one closes, and moves aside for full-screen video, and greetings and celebrations become
+an in-place squash.
 
 Art is a build input rather than runtime drawing.
 [`Tools/chargen.swift`](Tools/chargen.swift) holds ten candidate designs. Any shimeji-ee sprite
@@ -480,9 +540,9 @@ source=Notarized Developer ID
 ```
 
 `bash Tools/release.sh <version>` is the whole thing in one command. It refuses to build or publish
-until every gate passes: the version matches the tag, release notes exist, the tree is clean, the
-tag is free, unit tests pass, the end to end rig passes on the binary that will actually ship, a
-Developer ID certificate exists, and notary credentials are stored. `--publish` then notarizes,
+until every gate passes. The version must match the tag, release notes must exist, the tree must be
+clean and the tag free. Unit tests and the end to end rig must pass on the binary that will
+actually ship, and a Developer ID certificate and stored notary credentials must exist. `--publish` then notarizes,
 staples, tags, and publishes the GitHub release with the changelog section for that version.
 
 How it got here:
@@ -508,7 +568,7 @@ How it got here:
   unit tests and the shortcut registers (`--diag` reports it), but nobody has spoken into it yet.
 - **The Focus reader is untested against a Focus mode that is actually on.** macOS has no public API
   for it, so [`QuietHours`](Sources/WindowPet/QuietHours.swift) reads the database macOS keeps for
-  its own use and treats any failure as "not in Focus", because a watch that never fires is worse
+  its own use. It treats any failure as "not in Focus", because a watch that never fires is worse
   than one that speaks during a Focus mode. `--diag` reports what it currently reads.
 - **The wake word note now survives a bench run.** It lives in
   [`Tools/energy-notes.md`](Tools/energy-notes.md) and `energy-bench.sh` appends it below the
@@ -516,9 +576,12 @@ How it got here:
 - **The planner travel phase of the rig is timing sensitive** under load, as described above.
 - **No screen recording or demo clip exists**, which for a project whose entire pitch is visual is
   the single most valuable missing asset.
-- **Multi-display behavior is tested as policy, not on hardware.** The 13 tests in
+- **Multi-display behavior is tested as policy, not on hardware.** The 19 tests in
   [`DisplayChoiceTests.swift`](Tests/WindowPetCoreTests/DisplayChoiceTests.swift) cover the rules
-  for picking a display and clamping to it, but every run so far has been on one screen.
+  for picking a display and clamping to it. The 15 in
+  [`DisplayGeometryTests.swift`](Tests/WindowPetCoreTests/DisplayGeometryTests.swift) cover floors,
+  ceilings and walls with displays side by side and stacked. Every run so far has been on one
+  screen.
 
 ## License
 
