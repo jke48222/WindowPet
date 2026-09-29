@@ -50,24 +50,9 @@ final class CommandBar: NSObject, NSTextFieldDelegate {
         var streaming = false
     }
 
-    /// Where a request came from. Decides who may be interrupted, whether the
-    /// answer is spoken, and whether a safety check may take the keyboard.
-    /// `voice` is push-to-talk, where the user is holding the key; `wakeWord`
-    /// is anything the "Hey Rusty" listener heard, which may be a video, a
-    /// call or someone else in the room.
-    private enum RunSource {
-        case typed, voice, wakeWord, dropped, scheduled
-
-        var isVoice: Bool { self == .voice || self == .wakeWord }
-
-        /// The request itself carries words the user did not write: a
-        /// dropped file, or a standing ask (possibly written by the model).
-        var isUntrusted: Bool { self == .dropped || self == .scheduled }
-
-        /// Heard by the wake word, which picks up any audio nearby. Typing,
-        /// key presses, shortcuts and tricks from it confirm.
-        var isHeard: Bool { self == .wakeWord }
-    }
+    /// Where a request came from, and whose words it carries (see
+    /// `RequestSource` in the core, where the rule is tested).
+    private typealias RunSource = RequestSource
 
     private struct ActiveRun {
         let id: Int
@@ -1082,8 +1067,8 @@ final class CommandBar: NSObject, NSTextFieldDelegate {
         // from the user's own typing or held key (a standing ask, the wake
         // word) are gated like a tainted agent run.
         if source != .dropped, let action = AssistantParser.parse(text) {
-            let gated = source.isUntrusted || source.isHeard
-                ? AgentGate.requiresConfirmation(action, tainted: source.isUntrusted,
+            let gated = source.isUntrusted
+                ? AgentGate.requiresConfirmation(action, tainted: true,
                                                  heard: source.isHeard)
                 : action.needsConfirmation
             if gated {

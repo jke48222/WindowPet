@@ -86,4 +86,35 @@ final class ConversationHistoryTests: XCTestCase {
         history.append(role: "user", text: "dropped file", tainted: true)
         XCTAssertFalse(history.priorTurnsTainted)
     }
+
+    func testAFollowUpToAWakeWordRequestStartsTainted() {
+        var history = ConversationHistory(capacity: 24)
+        history.append(role: "user", text: "remember my code is 4412",
+                       tainted: RequestSource.wakeWord.isUntrusted)
+        history.append(role: "assistant", text: "Noted", tainted: true)
+        history.append(role: "user", text: "what is my code", tainted: RequestSource.typed.isUntrusted)
+        XCTAssertTrue(history.priorTurnsTainted)
+    }
+}
+
+/// Only what the user typed or said while holding the key is theirs; a
+/// dropped file, a standing ask and anything the wake word heard count as
+/// outside content.
+final class RequestSourceTests: XCTestCase {
+    func testOnlyTypingAndPushToTalkAreTheUsersOwnWords() {
+        let own = RequestSource.allCases.filter { !$0.isUntrusted }
+        XCTAssertEqual(Set(own), [.typed, .voice])
+    }
+
+    func testTheWakeWordIsOutsideContentAndHeard() {
+        XCTAssertTrue(RequestSource.wakeWord.isUntrusted)
+        XCTAssertTrue(RequestSource.wakeWord.isHeard)
+        XCTAssertTrue(RequestSource.wakeWord.isVoice)
+    }
+
+    func testPushToTalkIsVoiceButNotHeard() {
+        XCTAssertTrue(RequestSource.voice.isVoice)
+        XCTAssertFalse(RequestSource.voice.isHeard)
+        XCTAssertFalse(RequestSource.voice.isUntrusted)
+    }
 }

@@ -85,16 +85,13 @@ final class AgentSession {
     ///     `text`. A dropped file's prompt carries the file itself, which must
     ///     never be written to disk, so the panel passes the visible label.
     ///   - untrustedInput: the request itself carries outside content (a
-    ///     dropped file, a standing ask the model may have written), so the
-    ///     run starts tainted.
-    ///   - untrustedInput: the request itself carries outside content (a
-    ///     dropped file, a standing ask the model may have written), or the
-    ///     panel history it replays does. The run starts tainted, because
-    ///     taint belongs to the conversation, not to the one run that first
-    ///     read the content.
+    ///     dropped file, a standing ask the model may have written, words the
+    ///     wake word heard), or the panel history it replays does. The run
+    ///     starts tainted, because taint belongs to the conversation, not to
+    ///     the one run that first read the content.
     ///   - heard: the request came through the wake word, which hears any
-    ///     audio nearby (a video, a call). Typing, key presses, shortcuts and
-    ///     tricks then confirm (see `AgentGate`).
+    ///     audio nearby (a video, a call). On top of the taint, typing, key
+    ///     presses, shortcuts and tricks confirm (see `AgentGate`).
     func start(_ text: String, context: String,
                history: [(role: String, text: String)],
                noteAs: String? = nil, untrustedInput: Bool = false,

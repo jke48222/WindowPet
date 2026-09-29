@@ -50,6 +50,28 @@ public enum AutoHidePolicy {
     }
 }
 
+/// Where a panel request came from. Decides who may be interrupted, whether
+/// the answer is spoken, whether a safety check may take the keyboard, and
+/// whose words the request carries. `voice` is push-to-talk, where the user
+/// is holding the key; `wakeWord` is anything the "Hey Rusty" listener
+/// heard, which may be a video, a call or someone else in the room.
+public enum RequestSource: Sendable, CaseIterable {
+    case typed, voice, wakeWord, dropped, scheduled
+
+    public var isVoice: Bool { self == .voice || self == .wakeWord }
+
+    /// The request carries words the user did not type or say while holding
+    /// the key: a dropped file, a standing ask (possibly written by the
+    /// model), or whatever the wake word heard. It is treated like a web
+    /// page: the run starts tainted, so gated tools confirm and Rusty's
+    /// memory cannot change, and the taint stays on the conversation.
+    public var isUntrusted: Bool { self == .dropped || self == .scheduled || self == .wakeWord }
+
+    /// Heard by the wake word. On top of the taint, typing, key presses,
+    /// shortcuts and tricks from it always confirm.
+    public var isHeard: Bool { self == .wakeWord }
+}
+
 /// The rolling history replayed to the model, with the taint carried per
 /// turn. A run is tainted when any turn it replays is, so outside content
 /// keeps gating side effects for as long as it is in the window the model
