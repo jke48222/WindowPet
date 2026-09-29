@@ -34,12 +34,19 @@ public enum AgentLoop {
         case .turn(let turn):
             if turn.stopReason == "pause_turn" { return .resend }
             if turn.calls.isEmpty {
+                // Never an empty answer: it would land in the panel history as
+                // an empty assistant turn, which the API rejects on replay.
                 let text = turn.text.isEmpty ? lastText : turn.text
-                return .answer(AssistantRouting.sanitizeReply(text, limit: ClaudeRouting.answerLimit))
+                let answer = AssistantRouting.sanitizeReply(text, limit: ClaudeRouting.answerLimit)
+                return .answer(answer.isEmpty ? emptyAnswer : answer)
             }
             return .execute(turn.calls)
         }
     }
+
+    /// Said when the model finishes with nothing to say, typically an empty
+    /// end_turn after a tool that already did the job.
+    public static let emptyAnswer = "Done."
 
     /// What Rusty says when the iteration cap stops the loop: whatever he last
     /// managed to say, or an honest admission, never silence.
@@ -65,9 +72,11 @@ public struct AgentConversation {
     /// `history` is the panel's own transcript, replayed so the model sees the
     /// conversation the user sees.
     public init(history: [(role: String, text: String)] = []) {
-        messages = history.map {
-            ["role": $0.role == "assistant" ? "assistant" : "user", "content": $0.text]
-        }
+        // Blank turns are dropped: the API rejects an empty text message
+        // anywhere but a final assistant turn.
+        messages = history
+            .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map { ["role": $0.role == "assistant" ? "assistant" : "user", "content": $0.text] }
     }
 
     /// Opens the turn. The situation line rides with the request so the model
@@ -90,6 +99,9 @@ public struct AgentConversation {
     /// server tool results must survive exactly as sent.
     public mutating func record(_ turn: ClaudeAgent.Turn) {
         if !turn.text.isEmpty { lastText = turn.text }
+        // An empty end_turn has nothing to echo, and an assistant message
+        // with empty content is rejected if anything follows it.
+        guard !turn.rawContent.isEmpty else { return }
         messages.append(ClaudeAgent.assistantEcho(turn.rawContent))
     }
 

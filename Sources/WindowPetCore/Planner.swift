@@ -25,19 +25,28 @@ public enum Planner {
     private struct Node {
         let kind: Platform.Kind
         let x: CGFloat
+        /// Top of the platform this node stands on, when known. Floors on
+        /// displays stacked one above another share x ranges, so the kind
+        /// and x alone do not say which floor it is.
+        let y: CGFloat?
         let steps: [Step]
         let cost: CGFloat
     }
 
     /// Breadth-limited best-first search, depth ≤ 4. Deterministic.
+    ///
+    /// `fromY` is the anchor's height. Pass it so a start on a floor is
+    /// resolved to the floor actually underfoot when displays are stacked;
+    /// without it the first floor spanning `fromX` is used.
     public static func plan(fromKind: Platform.Kind, fromX: CGFloat,
+                            fromY: CGFloat? = nil,
                             to targetKind: Platform.Kind,
                             platforms: [Platform],
                             config: Config = Config()) -> [Step]? {
         guard let targetPlatform = platforms.first(where: { $0.kind == targetKind }) else { return nil }
         let targetX = perchX(on: targetPlatform, config: config)
 
-        var frontier = [Node(kind: fromKind, x: fromX, steps: [], cost: 0)]
+        var frontier = [Node(kind: fromKind, x: fromX, y: fromY, steps: [], cost: 0)]
         var visited: Set<String> = [key(fromKind, fromX)]
         var best: Node?
 
@@ -65,9 +74,7 @@ public enum Planner {
     private static func expand(_ node: Node, platforms: [Platform],
                                targetKind: Platform.Kind, targetX: CGFloat,
                                config: Config, visited: inout Set<String>) -> [Node] {
-        guard let here = platforms.first(where: {
-            $0.kind == node.kind && $0.minX - 14 <= node.x && node.x <= $0.maxX + 14
-        }) ?? platforms.first(where: { $0.kind == node.kind }) else { return [] }
+        guard let here = standing(on: node, platforms: platforms) else { return [] }
 
         var out: [Node] = []
         let hereY = here.topY
@@ -83,7 +90,7 @@ public enum Planner {
                 let k = key(p.kind, cx)
                 guard !visited.contains(k) else { continue }
                 visited.insert(k)
-                out.append(Node(kind: p.kind, x: cx,
+                out.append(Node(kind: p.kind, x: cx, y: p.topY,
                                 steps: node.steps + [.leapTo(kind: p.kind, x: cx)],
                                 cost: node.cost + d / 400 + 0.4))
                 break // one candidate per platform is plenty
@@ -98,7 +105,7 @@ public enum Planner {
             let k = key(node.kind, walkX)
             if !visited.contains(k) {
                 visited.insert(k)
-                out.append(Node(kind: node.kind, x: walkX,
+                out.append(Node(kind: node.kind, x: walkX, y: hereY,
                                 steps: node.steps + [.walkTo(x: walkX)],
                                 cost: node.cost + abs(walkX - node.x) / 300))
             }
@@ -115,12 +122,28 @@ public enum Planner {
                 visited.insert(k)
                 let walkEdge: Step = .walkTo(x: edgeX < here.minX ? here.minX + config.petHalfWidth - 8
                                                                   : here.maxX - config.petHalfWidth + 8)
-                out.append(Node(kind: landing.kind, x: edgeX,
+                out.append(Node(kind: landing.kind, x: edgeX, y: landing.topY,
                                 steps: node.steps + [walkEdge, .stepOffTo(x: edgeX)],
                                 cost: node.cost + 0.8))
             }
         }
         return out
+    }
+
+    /// The platform a node stands on: of that kind, spanning its x, and when
+    /// its height is known, the highest one at or below it (the nearest one
+    /// if none is below).
+    private static func standing(on node: Node, platforms: [Platform]) -> Platform? {
+        let spanning = platforms.filter {
+            $0.kind == node.kind && $0.minX - 14 <= node.x && node.x <= $0.maxX + 14
+        }
+        guard let y = node.y, spanning.count > 1 else {
+            return spanning.first ?? platforms.first(where: { $0.kind == node.kind })
+        }
+        if let below = spanning.filter({ $0.topY <= y + 2 }).max(by: { $0.topY < $1.topY }) {
+            return below
+        }
+        return spanning.min { abs($0.topY - y) < abs($1.topY - y) }
     }
 
     public static func perchX(on p: Platform, config: Config) -> CGFloat {

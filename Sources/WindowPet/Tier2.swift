@@ -123,6 +123,12 @@ final class Tier2Manager {
     private var titleRates: [pid_t: DecayingRate] = [:]
     private var probeTimer: DispatchSourceTimer?
     private let maxObservers = 6
+    /// When creating an observer for an app last failed. A hung app fails
+    /// every registration only after waiting out each messaging timeout, on
+    /// the main thread, so it is not asked again until this backoff passes
+    /// (or it quits; a relaunch is a new pid).
+    private var createFailedAt: [pid_t: TimeInterval] = [:]
+    static let createRetryBackoff: TimeInterval = 60
 
     /// Debounced "this app's windows did something" signal (30 ms leading
     /// edge — Stage Manager fires bursts during group transitions).
@@ -138,17 +144,26 @@ final class Tier2Manager {
 
     func attach(to pid: pid_t, protecting protected: pid_t? = nil) {
         guard enabled, pid > 0, observers[pid] == nil else { return }
-        if observers.count >= maxObservers {
-            evictOldest(protecting: protected)
+        let now = CACurrentMediaTime()
+        if let failedAt = createFailedAt[pid], now - failedAt < Self.createRetryBackoff {
+            return // Tier 1 carries this app until the backoff passes
         }
         guard let obs = Tier2Observer(pid: pid) else {
+            // Measured after the attempt: the attempt itself is what blocked.
+            createFailedAt[pid] = CACurrentMediaTime()
             states[pid] = {
-                var s = AppState(pid: pid, attachedAt: CACurrentMediaTime())
+                var s = AppState(pid: pid, attachedAt: now)
                 s.degraded = true
                 s.note = "observer create failed"
                 return s
             }()
             return
+        }
+        createFailedAt.removeValue(forKey: pid)
+        // Make room only for an observer that exists. Evicting first would
+        // drop a working app's Tier 2 for an attempt that then fails.
+        if observers.count >= maxObservers {
+            evictOldest(protecting: protected)
         }
         obs.onEvent = { [weak self] p, note in self?.handleEvent(pid: p, note: note) }
         observers[pid] = obs
@@ -175,6 +190,7 @@ final class Tier2Manager {
         states.removeValue(forKey: pid)
         lastWakeAt.removeValue(forKey: pid)
         titleRates.removeValue(forKey: pid)
+        createFailedAt.removeValue(forKey: pid)
     }
 
     func isAttached(_ pid: pid_t) -> Bool { observers[pid] != nil }

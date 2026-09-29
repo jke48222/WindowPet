@@ -266,6 +266,43 @@ final class ClaudeRoutingTests: XCTestCase {
         XCTAssertEqual(ClaudeRouting.parseText(payload), .text("The error says the disk is full."))
     }
 
+    /// Haiku 4.5 rejects output_config.effort with a 400, so a user who
+    /// picks it to save money must not get an error on every call.
+    @MainActor func testHaikuRequestsNeverCarryEffort() throws {
+        let model = "claude-haiku-4-5"
+        XCTAssertFalse(ClaudeRouting.supportsEffort(model: model))
+        let specs = [
+            ClaudeRouting.routeRequest(text: "hi", context: "c", apiKey: "k", model: model),
+            ClaudeRouting.visionRequest(question: "q", imageBase64: "AAAA", apiKey: "k", model: model),
+            ClaudeAgent.agentRequest(messages: [ClaudeAgent.userMessage("hi")], apiKey: "k",
+                                     model: model),
+        ]
+        for spec in specs {
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(spec).body)
+                                     as? [String: Any])
+            XCTAssertEqual(body["model"] as? String, model)
+            let config = body["output_config"] as? [String: Any]
+            XCTAssertNil(config?["effort"])
+        }
+        // Routing still pins the response to the schema on Haiku.
+        let route = try XCTUnwrap(ClaudeRouting.routeRequest(text: "hi", context: "c",
+                                                             apiKey: "k", model: model))
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: route.body) as? [String: Any])
+        let config = try XCTUnwrap(body["output_config"] as? [String: Any])
+        XCTAssertNotNil(config["format"])
+    }
+
+    @MainActor func testEffortStaysOnModelsThatTakeIt() throws {
+        for model in ["claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-sonnet-5"] {
+            XCTAssertTrue(ClaudeRouting.supportsEffort(model: model), model)
+            let spec = try XCTUnwrap(ClaudeAgent.agentRequest(
+                messages: [ClaudeAgent.userMessage("hi")], apiKey: "k", model: model))
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: spec.body) as? [String: Any])
+            XCTAssertEqual((body["output_config"] as? [String: Any])?["effort"] as? String,
+                           "medium", model)
+        }
+    }
+
     func testParseTextRefusalAndError() {
         let refusal = Data(#"{"type":"message","stop_reason":"refusal","content":[]}"#.utf8)
         XCTAssertEqual(ClaudeRouting.parseText(refusal), .refused)

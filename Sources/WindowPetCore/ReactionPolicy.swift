@@ -48,6 +48,29 @@ public enum ReactionPolicy {
         awaySeconds >= awayThreshold
     }
 
+    /// Idle long enough, by the system's own idle clock (keys, scrolling,
+    /// trackpad, pointer, clicks), to count as away.
+    public static func isAway(idleSeconds: TimeInterval) -> Bool {
+        idleSeconds >= awayThreshold
+    }
+
+    /// How long the user has been away when the Mac comes back from a lock
+    /// or sleep: the idle time they had built up when it locked, plus the
+    /// time it stayed locked (wall clock, since the media clock stops during
+    /// sleep). A clock that went backwards counts as no time.
+    public static func awayAcrossSuspend(idleAtSuspend: TimeInterval,
+                                         suspendedFor: TimeInterval) -> TimeInterval {
+        max(0, idleAtSuspend) + max(0, suspendedFor)
+    }
+
+    /// Input happened since the previous sample: the idle clock went back.
+    /// Samples arrive every few hundred milliseconds, so a real event shows
+    /// up as a drop of well over the slack.
+    public static func inputResumed(previousIdle: TimeInterval, idle: TimeInterval,
+                                    slack: TimeInterval = 0.25) -> Bool {
+        idle + slack < previousIdle
+    }
+
     public static func isDistraction(bundleID: String?) -> Bool {
         bundleID.map(distractionBundleIDs.contains) ?? false
     }

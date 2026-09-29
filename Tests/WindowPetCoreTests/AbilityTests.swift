@@ -546,4 +546,13 @@ final class PetHelpTests: XCTestCase {
         // And it says what the money situation is, rather than surprising them.
         XCTAssertTrue(onboarding.contains("daily spending limit"))
     }
+
+    /// The wake word keeps the microphone open, so the first-run copy must
+    /// say it is off until chosen, not invite the user to just say it.
+    func testOnboardingSaysTheWakeWordIsOffUntilChosen() {
+        let onboarding = PetHelp.onboarding(summonShortcut: "Option-Space",
+                                            dictationShortcut: "Option-D")
+        XCTAssertTrue(onboarding.contains("\"Hey Rusty\" is off until you tick the box"))
+        XCTAssertFalse(onboarding.contains("or say \"hey rusty\""))
+    }
 }

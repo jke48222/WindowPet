@@ -5,12 +5,12 @@ import Foundation
 /// motion instead of running hot:
 ///
 ///   no target      → 2 Hz   (waiting for a window to exist)
-///   target, still  → 10 Hz  (dossier's Tier-1 band; drag-start latency ≤100 ms)
+///   target, still  → 10 Hz  (the Tier 1 band; drag-start latency ≤100 ms)
 ///   target, moving → 60 Hz  (only while frames are actually changing)
 ///
 /// "Moving" means a frame change was seen within `motionHoldSeconds`.
-/// This is a plain timer policy for the milestone; the CADisplayLink swap
-/// (CVDisplayLink is deprecated on modern macOS) comes with real animation in S2.
+/// This paces window polling only. Frame animation runs on a CADisplayLink in
+/// PetEngine (CVDisplayLink is deprecated on modern macOS).
 public enum RatePolicy {
     public static let motionHoldSeconds: TimeInterval = 0.6
 

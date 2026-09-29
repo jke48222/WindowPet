@@ -129,6 +129,22 @@ final class PlannerTests: XCTestCase {
                                   platforms: [floor, island]))
     }
 
+    /// Displays stacked one above another share x ranges, so a floor start
+    /// is resolved by height: from the upper display's floor a window on
+    /// that display is one leap away, from the laptop's floor it is not.
+    func testStackedFloorsAreResolvedByHeight() {
+        let laptopFloor = Platform(kind: .floor, topY: 70, minX: 0, maxX: 1512)
+        let upperFloor = Platform(kind: .floor, topY: 982, minX: -524, maxX: 2036)
+        let upperWindow = Platform(kind: .window(7), topY: 1400, minX: 400, maxX: 900)
+        let platforms = [laptopFloor, upperFloor, upperWindow]
+        let fromUpper = Planner.plan(fromKind: .floor, fromX: 500, fromY: 982,
+                                     to: .window(7), platforms: platforms)
+        XCTAssertNotNil(fromUpper)
+        XCTAssertTrue(fromUpper?.contains { if case .leapTo(.window(7), _) = $0 { return true }; return false } ?? false)
+        XCTAssertNil(Planner.plan(fromKind: .floor, fromX: 500, fromY: 70,
+                                  to: .window(7), platforms: platforms))
+    }
+
     func testStepOffRouteFromHighWindowToFloor() {
         let steps = Planner.plan(fromKind: .window(2), fromX: 900, to: .floor,
                                  platforms: [floor, shelf, high])!

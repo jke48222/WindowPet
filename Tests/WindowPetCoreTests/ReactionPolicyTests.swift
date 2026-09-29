@@ -29,6 +29,18 @@ final class ReactionPolicyTests: XCTestCase {
         XCTAssertTrue(ReactionPolicy.isReturnGreeting(awaySeconds: 120))
     }
 
+    func testLockTimeCountsTowardBeingAway() {
+        // 30 s idle, then a 2 minute lock: away, so the unlock greets.
+        let away = ReactionPolicy.awayAcrossSuspend(idleAtSuspend: 30, suspendedFor: 120)
+        XCTAssertEqual(away, 150)
+        XCTAssertTrue(ReactionPolicy.isAway(idleSeconds: away))
+        // A short lock right after typing is not an absence.
+        XCTAssertFalse(ReactionPolicy.isAway(
+            idleSeconds: ReactionPolicy.awayAcrossSuspend(idleAtSuspend: 2, suspendedFor: 20)))
+        // A wall clock that went backwards adds nothing.
+        XCTAssertEqual(ReactionPolicy.awayAcrossSuspend(idleAtSuspend: 10, suspendedFor: -500), 10)
+    }
+
     func testDistractionSetMembership() {
         XCTAssertTrue(ReactionPolicy.isDistraction(bundleID: "com.hnc.Discord"))
         XCTAssertFalse(ReactionPolicy.isDistraction(bundleID: "com.apple.dt.Xcode"))

@@ -23,6 +23,25 @@ public enum ClaudeRouting {
 
     public static let answerRanLongMessage = "answer ran long, try again"
 
+    /// Whether `model` accepts `output_config.effort`. Haiku 4.5 (and the
+    /// retired Claude 3 family) reject the field with a 400, so a user who
+    /// picks Haiku to save money would otherwise get nothing but errors.
+    /// Every other model the app offers takes it.
+    public static func supportsEffort(model: String) -> Bool {
+        let id = model.lowercased()
+        return !(id.hasPrefix("claude-haiku-") || id.hasPrefix("claude-3"))
+    }
+
+    /// The `output_config` for a request: `effort` only where the model
+    /// accepts it, plus whatever else the caller needs (a response format).
+    /// Nil when nothing is left, so the key is omitted entirely.
+    public static func outputConfig(model: String, effort: String,
+                                    extra: [String: Any] = [:]) -> [String: Any]? {
+        var config = extra
+        if supportsEffort(model: model) { config["effort"] = effort }
+        return config.isEmpty ? nil : config
+    }
+
     public struct RequestSpec {
         public let url: URL
         public let headers: [String: String]
@@ -37,6 +56,14 @@ public enum ClaudeRouting {
                               "x-api-key": apiKey,
                               "anthropic-version": apiVersion],
                     body: body)
+    }
+
+    /// Serializes a request body with sorted keys. Swift dictionaries do not
+    /// iterate in a stable order, and prompt caching matches the rendered
+    /// tools and system prefix byte for byte, so an unsorted body would miss
+    /// the cache at random. Every request builder goes through here.
+    public static func encodeBody(_ payload: [String: Any]) -> Data? {
+        try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
     }
 
     /// Shared decoding of a Messages API response envelope, so the four
@@ -126,9 +153,9 @@ public enum ClaudeRouting {
     complete, short AppleScript in the argument: it can drive apps, System \
     Events, Notes, Reminders, Calendar, Music, timers, dark mode, Wi-Fi, \
     and nearly everything else on a Mac. You are fluent in AppleScript; \
-    prefer the simplest script that does the job, and expect scripts that \
-    delete things, touch the shell, or press keys to pause for the user's \
-    confirmation. For anything that truly needs root (installing tools, \
+    prefer the simplest script that does the job, and expect every script \
+    beyond volume, notifications, dark mode, and music playback to pause \
+    for the user's confirmation. For anything that truly needs root (installing tools, \
     editing system files, package managers) use "run_admin" with a single \
     shell command in the argument; macOS will ask the user for their admin \
     password, so use it only when ordinary tools cannot do the job. \
@@ -187,19 +214,20 @@ public enum ClaudeRouting {
         }
         messages.append(["role": "user",
                          "content": "Current situation: \(context)\n\nUser said: \(text)"])
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "model": model,
             // Roomy enough for a full explanation plus the JSON envelope; we
             // only pay for what is generated. parseRoute reports truncation.
             "max_tokens": 8192,
             "system": systemPrompt,
-            "output_config": [
-                "effort": "low",
-                "format": ["type": "json_schema", "schema": routeSchema],
-            ],
             "messages": messages,
         ]
-        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
+        // Structured outputs work on every model the app offers; effort does
+        // not (Haiku rejects it), so it rides along only where accepted.
+        payload["output_config"] = outputConfig(
+            model: model, effort: "low",
+            extra: ["format": ["type": "json_schema", "schema": routeSchema]])
+        guard let body = encodeBody(payload) else { return nil }
         return messagesRequest(body: body, apiKey: apiKey)
     }
 

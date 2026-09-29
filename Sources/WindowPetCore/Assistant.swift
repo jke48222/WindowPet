@@ -1,9 +1,9 @@
 import Foundation
 
-/// A1 of the assistant: a small, GATED verb set parsed from typed commands.
-/// Pure and unit-tested; execution lives app-side. Destructive verbs (quit)
-/// are marked so the UI can require confirmation. Natural-language routing
-/// (A2) will layer on top of these same actions.
+/// The assistant's verb set: a small, gated set of actions that every tier
+/// (typed grammar, on-device model, Claude) proposes. Pure and unit-tested;
+/// execution lives app-side. Verbs that can do harm are marked so the UI
+/// requires confirmation before they run.
 public enum AssistantAction: Equatable {
     public enum WindowMove: String { case left, right, maximize, center }
     public enum VolumeOp: String { case up, down, mute, unmute }
@@ -69,18 +69,37 @@ public enum AssistantAction: Equatable {
     }
 
     /// Shown in the safety-check row so the user sees exactly what a
-    /// confirmation would run.
+    /// confirmation would run. Never truncated: the executor runs the whole
+    /// string, so the row shows the whole string, with line breaks and
+    /// invisible characters made visible. Payloads too long to show are
+    /// refused instead (see `exceedsConfirmableLength`).
     public var confirmationSummary: String? {
+        let show = AppleScriptPolicy.visible
         switch self {
-        case .quitApp(let name): return "Quit \(name)"
-        case .runAppleScript(let script): return "Run AppleScript: \(script.prefix(220))"
+        case .quitApp(let name): return "Quit \(show(name))"
+        case .runAppleScript(let script): return "Run AppleScript: \(show(script))"
         case .runAdminShell(let cmd):
-            return "Run as administrator (macOS will ask for your password): \(cmd.prefix(200))"
-        case .readFile(let path): return "Read the file at \(path)"
+            return "Run as administrator (macOS will ask for your password): \(show(cmd))"
+        case .readFile(let path): return "Read the file at \(show(path))"
         case .mcpCall(let server, let tool, let arguments, _):
-            let detail = arguments.isEmpty || arguments == "{}" ? "" : " with \(arguments.prefix(160))"
-            return "Run \(tool) on the \(server) server\(detail)"
+            let detail = arguments.isEmpty || arguments == "{}" ? "" : " with \(show(arguments))"
+            return "Run \(show(tool)) on the \(show(server)) server\(detail)"
         default: return nil
+        }
+    }
+
+    /// True when a gated payload is too long for the confirmation row to show
+    /// in full. The caller must refuse such an action (fail the tool call)
+    /// rather than ask about a summary the user cannot read to the end.
+    public var exceedsConfirmableLength: Bool {
+        let limit = AppleScriptPolicy.maxConfirmableLength
+        switch self {
+        case .runAppleScript(let text), .runAdminShell(let text), .readFile(let text),
+             .typeText(let text), .copyText(let text), .schedule(let text), .search(let text):
+            return text.count > limit
+        case .openURL(let url): return url.absoluteString.count > limit
+        case .mcpCall(_, _, let arguments, _): return arguments.count > limit
+        default: return false
         }
     }
 }
@@ -153,10 +172,14 @@ public enum AssistantRouting {
         case "copy_text", "copy": return arg.isEmpty ? nil : .copyText(arg)
         case "press_keys", "press", "hotkey": return arg.isEmpty ? nil : .pressKeys(arg)
         case "screenshot": return .screenshot
+        // A script or command longer than the confirmation row can show in
+        // full is refused, never shown cut off.
         case "run_applescript", "applescript", "script":
-            return arg.isEmpty ? nil : .runAppleScript(arg)
+            return arg.isEmpty || arg.count > AppleScriptPolicy.maxConfirmableLength
+                ? nil : .runAppleScript(arg)
         case "run_admin", "sudo", "admin":
-            return arg.isEmpty ? nil : .runAdminShell(arg)
+            return arg.isEmpty || arg.count > AppleScriptPolicy.maxConfirmableLength
+                ? nil : .runAdminShell(arg)
         case "shortcut": return arg.isEmpty ? nil : .runShortcut(arg)
         case "windows": return .listWindows
         case "place_windows", "arrange":
@@ -203,17 +226,12 @@ public enum AssistantRouting {
         return (text, "")
     }
 
-    /// Scripts that touch the shell, files, sessions, or power state need a
-    /// human Return first. Biased toward confirming: one extra keypress on a
-    /// benign "delete the reminder" beats one silent "rm -rf".
+    /// Every script needs a human Return unless AppleScriptPolicy recognizes
+    /// all of it as one of a few known-safe shapes (volume, notifications,
+    /// dark mode, music playback). An allow-list, because AppleScript has
+    /// more roads to the shell than any list of bad words can name.
     public static func isDangerousScript(_ script: String) -> Bool {
-        let lowered = script.lowercased()
-        let markers = [
-            "do shell script", "delete", "erase", "empty trash", "trash",
-            "shut down", "shutdown", "restart", "log out", "logout",
-            "keystroke", "key code", "sudo", "rm -", "format", "password",
-        ]
-        return markers.contains { lowered.contains($0) }
+        !AppleScriptPolicy.isKnownSafe(script)
     }
 
     /// Bubble hygiene: single-line, no quotes-of-quotes, no em dashes. The

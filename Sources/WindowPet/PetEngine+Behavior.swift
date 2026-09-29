@@ -26,6 +26,17 @@ extension PetEngine {
 
     func execute(_ choice: BehaviorBrain.Choice, from ref: PlatformRef,
                          at now: TimeInterval) {
+        // With Reduce Motion on, whims that move him (a stroll, a trip to
+        // another window, a climb) become a sit of the same length: he stays
+        // put, blinks and naps, and still rides windows the user moves.
+        guard MotionPolicy.allows(Self.whim(of: choice), reduceMotion: reduceMotion) else {
+            if case .stroll(let d) = choice {
+                nextBehaviorAt = now + d + 2
+            } else {
+                nextBehaviorAt = now + .random(in: 6...12)
+            }
+            return
+        }
         switch choice {
         case .sit(let d):
             nextBehaviorAt = now + d
@@ -46,6 +57,18 @@ extension PetEngine {
         }
     }
 
+    static func whim(of choice: BehaviorBrain.Choice) -> MotionPolicy.Whim {
+        switch choice {
+        case .sit: return .sit
+        case .stroll: return .stroll
+        case .stepOff: return .stepOff
+        case .travelTo: return .travel
+        case .climbWall: return .climb
+        case .sleep: return .sleep
+        case .wake: return .wake
+        }
+    }
+
     func platformKind(of ref: PlatformRef) -> Platform.Kind {
         switch ref {
         case .window(let id): return .window(id)
@@ -62,7 +85,7 @@ extension PetEngine {
         }
         travelTargetWindow = id
         travelReplanUsed = false
-        if let steps = Planner.plan(fromKind: platformKind(of: ref), fromX: anchor.x,
+        if let steps = Planner.plan(fromKind: platformKind(of: ref), fromX: anchor.x, fromY: anchor.y,
                                     to: .window(id), platforms: world.platforms) {
             travelPlan = steps
             debugLastPlanCount = steps.count
@@ -109,7 +132,9 @@ extension PetEngine {
                 }
                 leapToPoint(CGPoint(x: x, y: win.frame.maxY), at: now)
             case .floor:
-                let f = world.floorPlatform(atX: x)
+                // The floor below him at that x: with displays stacked,
+                // the one he would actually come down on.
+                let f = world.floorPlatform(under: CGPoint(x: x, y: anchor.y))
                 leapToPoint(CGPoint(x: x, y: f.topY), at: now)
             }
         case .stepOffTo(let x):
@@ -146,17 +171,16 @@ extension PetEngine {
                 nextBehaviorAt = now + 1
                 return
             }
-            let f = world.floorPlatform(atX: anchor.x)
-            let h = (NSScreen.screens.first { $0.visibleFrame.minY == f.topY }?
-                .visibleFrame.height) ?? 800
-            beginClimb(side: side, targetY: f.topY + h * .random(in: 0.3...0.72), at: now)
+            let floor = world.floorRect(under: anchor)
+            beginClimb(side: side, targetY: floor.minY + floor.height * .random(in: 0.3...0.72),
+                       at: now)
             return
         }
         if let target = travelTargetWindow {
             if !travelReplanUsed {
                 travelReplanUsed = true
                 world.refresh(now: now)
-                if let steps = Planner.plan(fromKind: platformKind(of: ref), fromX: anchor.x,
+                if let steps = Planner.plan(fromKind: platformKind(of: ref), fromX: anchor.x, fromY: anchor.y,
                                             to: .window(target), platforms: world.platforms) {
                     travelPlan = steps
                     runNextPlanStep(at: now)
@@ -184,7 +208,7 @@ extension PetEngine {
 
     func startStepOffPlan(from ref: PlatformRef, at now: TimeInterval) {
         guard case .window = ref,
-              let seg = world.segment(of: platformKind(of: ref), atX: anchor.x) else {
+              let seg = world.segment(of: platformKind(of: ref), at: anchor) else {
             nextBehaviorAt = now + 1
             return
         }
@@ -197,7 +221,7 @@ extension PetEngine {
     }
 
     func startClimbPlan(at now: TimeInterval) {
-        let f = world.floorPlatform(atX: anchor.x)
+        let f = world.floorPlatform(under: anchor)
         let side: CGFloat = (anchor.x - f.minX < f.maxX - anchor.x) ? -1 : 1
         let inner: CGFloat = side < 0 ? f.minX + Self.bodyHalfWidth
                                       : f.maxX - Self.bodyHalfWidth

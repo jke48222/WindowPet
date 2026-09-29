@@ -29,11 +29,10 @@ extension ClaudeRouting {
                                      model: String = defaultModel) -> RequestSpec? {
         let prompt = question.trimmingCharacters(in: .whitespacesAndNewlines)
         let asked = prompt.isEmpty ? "What is on my screen right now?" : prompt
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "model": model,
             "max_tokens": 4096,
             "system": visionSystemPrompt,
-            "output_config": ["effort": "low"],
             "messages": [
                 ["role": "user", "content": [
                     ["type": "image",
@@ -43,7 +42,8 @@ extension ClaudeRouting {
                 ]],
             ],
         ]
-        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
+        payload["output_config"] = outputConfig(model: model, effort: "low")
+        guard let body = encodeBody(payload) else { return nil }
         return messagesRequest(body: body, apiKey: apiKey)
     }
 

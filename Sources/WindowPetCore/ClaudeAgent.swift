@@ -85,7 +85,7 @@ public enum ClaudeAgent {
         "press_keys": "Press one keyboard shortcut in the focused app. Argument: the combo, like cmd+t or cmd+shift+4.",
         "screenshot": "Save a screenshot to the Desktop. Argument: empty. Call this when the user wants a file; call look when you need to SEE the screen yourself.",
         "look": "Look at the user's screen and answer a question about it. Argument: what you want to know. Call this whenever the answer depends on what is on screen right now, including reading text, diagnosing an error, or checking whether an earlier step worked.",
-        "run_applescript": "Run a short AppleScript. Argument: the script. This is the catch-all for anything the other tools cannot do: Notes, Reminders, Calendar, Music, System Events, timers, dark mode, and reading app state. Scripts that delete things or touch the shell need the user to confirm.",
+        "run_applescript": "Run a short AppleScript. Argument: the script. This is the catch-all for anything the other tools cannot do: Notes, Reminders, Calendar, Music, System Events, timers, dark mode, and reading app state. Only scripts that just set the volume, show a notification, toggle dark mode, or control Music or Spotify playback run straight away; every other script waits for the user to confirm, so keep each one short and readable.",
         "run_admin": "Run one shell command as an administrator. Argument: the command. macOS asks the user for their password, so use it only when a task genuinely needs root.",
         "shortcut": "Run a Shortcuts automation by name. Argument: the shortcut name.",
         "remember": "Save a durable fact about this person for future conversations. Argument: the fact, in your own words ('prefers Safari over Chrome'). Call this when they tell you a preference, a name, a workflow, or how they want things done. Do not save secrets, passwords, or anything they would not want written to disk.",
@@ -136,7 +136,14 @@ public enum ClaudeAgent {
                     "required": ["argument"],
                 ],
             ]
-        } + serverTools + mcpTools
+        } + serverTools + sortedMCPTools
+    }
+
+    /// MCP tools in name order. The host collects them from a dictionary of
+    /// servers, whose order is not stable, and a reordered tool list is a
+    /// changed cache prefix.
+    @MainActor static var sortedMCPTools: [[String: Any]] {
+        mcpTools.sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
     }
 
     /// Anthropic-hosted tools. These run on Anthropic's side: they arrive as
@@ -223,11 +230,11 @@ public enum ClaudeAgent {
                 "cache_control": ["type": "ephemeral"],
             ]],
             "tools": toolDefinitions,
-            "output_config": ["effort": "medium"],
             "messages": messages,
         ]
+        payload["output_config"] = ClaudeRouting.outputConfig(model: model, effort: "medium")
         if stream { payload["stream"] = true }
-        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return nil }
+        guard let body = ClaudeRouting.encodeBody(payload) else { return nil }
         return ClaudeRouting.messagesRequest(body: body, apiKey: apiKey)
     }
 
@@ -251,11 +258,22 @@ public enum ClaudeAgent {
     }
 
     /// The one terminal decision shared by the buffered parser and the
-    /// streaming accumulator: given an assembled turn, either fail on empty
+    /// streaming accumulator: given an assembled turn, either fail on
     /// truncation or hand back the Turn.
+    ///
+    /// Truncation fails in two shapes. With nothing said and no call there
+    /// is nothing to use. With max_tokens landing on a tool_use block, that
+    /// block is the one generation stopped inside, so its input may be
+    /// incomplete even when it happens to parse; running it would act on
+    /// arguments the model never finished giving.
     public static func resolveTurn(text: String, calls: [ToolCall],
                                    rawContent: [[String: Any]], stopReason: String) -> TurnResult {
         if stopReason == "max_tokens", calls.isEmpty, text.isEmpty {
+            return .failed(ClaudeRouting.answerRanLongMessage)
+        }
+        if stopReason == "max_tokens",
+           let lastType = rawContent.last?["type"] as? String,
+           lastType == "tool_use" || lastType == "server_tool_use" {
             return .failed(ClaudeRouting.answerRanLongMessage)
         }
         return .turn(Turn(text: text, calls: calls, rawContent: rawContent, stopReason: stopReason))

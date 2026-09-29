@@ -10,8 +10,15 @@ import WindowPetCore
 @MainActor
 final class ScheduleRunner {
 
-    /// Called with the request to run and the entry it came from.
-    var onFire: ((SchedulePolicy.Entry) -> Void)?
+    /// Called with the request to run and the entry it came from. The ticker
+    /// only runs while something is listening: a headless mode (--diag,
+    /// --ask, --bench, the rig) never sets this, and must not consume a
+    /// standing ask that comes due while it happens to be running.
+    var onFire: ((SchedulePolicy.Entry) -> Void)? {
+        didSet {
+            if onFire == nil { stopTicker() } else { startTickerIfNeeded() }
+        }
+    }
 
     private(set) var entries: [SchedulePolicy.Entry] = []
     private var nextID = 1
@@ -20,7 +27,6 @@ final class ScheduleRunner {
     init() {
         entries = ScheduleStore.load()
         nextID = (entries.map(\.id).max() ?? 0) + 1
-        startTickerIfNeeded()
     }
 
     func add(_ raw: String, now: Date = Date()) -> String {
@@ -68,7 +74,7 @@ final class ScheduleRunner {
     // MARK: - The tick
 
     private func startTickerIfNeeded() {
-        guard !entries.isEmpty, ticker == nil else { return }
+        guard !entries.isEmpty, ticker == nil, onFire != nil else { return }
         // Every twenty seconds. The grace window is ten minutes wide, so this
         // is far more often than it needs to be and still costs nothing.
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -85,16 +91,26 @@ final class ScheduleRunner {
 
     private func tick() {
         guard !entries.isEmpty else { return stopTicker() }
+        guard let onFire else { return stopTicker() }
+        // Nothing runs behind the lock screen or while asleep; an entry that
+        // came due then fires on the first tick after unlock, inside its
+        // grace window.
+        guard !ScreenLock.shared.isSuspended else { return }
         let now = Date()
+        var due: [SchedulePolicy.Entry] = []
         for (index, entry) in entries.enumerated() where SchedulePolicy.isDue(entry, now: now) {
             entries[index].markFired(at: now)
-            onFire?(entry)
+            due.append(entry)
         }
+        // Nothing came due on almost every tick; the file is written only
+        // when an entry was actually marked or removed.
+        guard !due.isEmpty else { return }
         // A one-off is done once it has fired; leaving it would clutter the
         // list with things that will never happen again.
         entries.removeAll { $0.cadence == .once && $0.lastFiredAt != nil }
         ScheduleStore.save(entries)
         if entries.isEmpty { stopTicker() }
+        due.forEach(onFire)
     }
 }
 

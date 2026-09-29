@@ -58,6 +58,44 @@ final class MCPProtocolTests: XCTestCase {
         XCTAssertEqual(MCPProtocol.decode(line: #"{"jsonrpc":"2.0","method":"log"}"#), .other)
     }
 
+    /// Either side may ping at any time. A server's ping whose id matches a
+    /// call we are waiting on must not be taken as that call's result.
+    func testServerRequestIsNotAReply() {
+        let ping = #"{"jsonrpc":"2.0","id":3,"method":"ping"}"#
+        XCTAssertEqual(MCPProtocol.decode(line: ping), .other)
+        XCTAssertEqual(MCPProtocol.decode(line: #"{"jsonrpc":"2.0","id":"s1","method":"roots/list"}"#),
+                       .other)
+    }
+
+    func testServerPingIsAnswered() throws {
+        let reply = try XCTUnwrap(MCPProtocol.serverRequestReply(
+            line: #"{"jsonrpc":"2.0","id":3,"method":"ping"}"#))
+        XCTAssertEqual(reply.last, 0x0A)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: reply) as? [String: Any])
+        XCTAssertEqual(root["jsonrpc"] as? String, "2.0")
+        XCTAssertEqual(root["id"] as? Int, 3)
+        XCTAssertEqual((root["result"] as? [String: Any])?.isEmpty, true)
+        XCTAssertNil(root["error"])
+    }
+
+    /// Anything else the server asks gets an error rather than silence, and
+    /// a string id is echoed as a string.
+    func testUnknownServerRequestGetsMethodNotFound() throws {
+        let reply = try XCTUnwrap(MCPProtocol.serverRequestReply(
+            line: #"{"jsonrpc":"2.0","id":"abc","method":"sampling/createMessage","params":{}}"#))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: reply) as? [String: Any])
+        XCTAssertEqual(root["id"] as? String, "abc")
+        XCTAssertEqual((root["error"] as? [String: Any])?["code"] as? Int, MCPProtocol.methodNotFound)
+    }
+
+    /// Replies, notifications and log lines need no answer.
+    func testOnlyRequestsGetAReply() {
+        XCTAssertNil(MCPProtocol.serverRequestReply(line: #"{"jsonrpc":"2.0","id":3,"result":{}}"#))
+        XCTAssertNil(MCPProtocol.serverRequestReply(
+            line: #"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#))
+        XCTAssertNil(MCPProtocol.serverRequestReply(line: "starting up..."))
+    }
+
     func testResultWithNoPayloadIsStillAResult() {
         guard case .result(_, let payload) = MCPProtocol.decode(line: #"{"id":1}"#) else {
             return XCTFail("expected a result")
@@ -181,9 +219,35 @@ final class MCPProtocolTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(config.servers["b"]).isTrusted)
     }
 
-    func testExampleConfigIsValid() throws {
+    /// The sample written by "Edit Tool Servers" must start nothing: opening
+    /// the file once used to make every launch run `npx -y`.
+    func testExampleConfigStartsNothing() throws {
         let config = try JSONDecoder().decode(MCPConfig.self, from: Data(MCPConfig.example.utf8))
-        XCTAssertFalse(config.servers.isEmpty)
+        XCTAssertTrue(config.servers.isEmpty)
+        XCTAssertFalse(MCPConfig.isUntouchedLegacyExample(Data(MCPConfig.example.utf8)))
+    }
+
+    /// The sample itself is still a valid entry once a person moves it into
+    /// "servers".
+    func testExampleSampleIsAValidEntry() throws {
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(MCPConfig.example.utf8))
+                                   as? [String: Any])
+        let sample = try XCTUnwrap(object["_example"])
+        let moved = try JSONSerialization.data(withJSONObject: ["servers": sample])
+        let config = try JSONDecoder().decode(MCPConfig.self, from: moved)
+        XCTAssertEqual(config.servers["notes"]?.command, "npx")
+        XCTAssertFalse(try XCTUnwrap(config.servers["notes"]).isTrusted)
+    }
+
+    /// The old live sample, untouched, is recognised and retired; anything a
+    /// person edited is left alone.
+    func testUntouchedLegacyExampleIsRecognised() {
+        let legacy = #"{"servers":{"notes":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/Users/you/Documents"],"trust":"ask"}}}"#
+        XCTAssertTrue(MCPConfig.isUntouchedLegacyExample(Data(legacy.utf8)))
+        let edited = legacy.replacingOccurrences(of: "/Users/you/Documents", with: "/Users/jalen/Notes")
+        XCTAssertFalse(MCPConfig.isUntouchedLegacyExample(Data(edited.utf8)))
+        let two = #"{"servers":{"notes":{"command":"npx","args":["/Users/you/Documents"]},"git":{"command":"uvx","args":["mcp-server-git"]}}}"#
+        XCTAssertFalse(MCPConfig.isUntouchedLegacyExample(Data(two.utf8)))
     }
 
     // MARK: gating
